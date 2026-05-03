@@ -19,10 +19,12 @@ sub-dict and do NOT block the rest of the scan.
 """
 from __future__ import annotations
 
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from typing import Optional
 
+from tradingview_mcp.core.services.log import get_logger
 from tradingview_mcp.core.services.news_service import fetch_news_summary
 from tradingview_mcp.core.services.screener_service import analyze_coin
 from tradingview_mcp.core.services.sec_service import get_insider_transactions
@@ -30,6 +32,8 @@ from tradingview_mcp.core.services.yahoo_finance_service import (
     get_dividends,
     get_earnings,
 )
+
+_log = get_logger("scan")
 
 
 _DEFAULT_WORKERS = 6
@@ -88,6 +92,8 @@ def _scan_one(
 ) -> dict:
     """Run all per-symbol lookups serially inside a worker thread."""
     out: dict = {"symbol": symbol.upper()}
+    started = time.perf_counter()
+    _log.info("  ↪ %s: starting (TA + earnings + dividends + news)", symbol.upper())
 
     ta = analyze_coin(symbol, exchange, timeframe)
     if "error" in ta:
@@ -132,6 +138,12 @@ def _scan_one(
     out["flags"] = _flags(ta, earnings if "error" not in earnings else {},
                           dividends if "error" not in dividends else {},
                           news_count)
+    elapsed = (time.perf_counter() - started) * 1000
+    if out["flags"]:
+        _log.info("  ↪ %s: done in %dms — flags: %s",
+                  symbol.upper(), elapsed, ", ".join(out["flags"]))
+    else:
+        _log.info("  ↪ %s: done in %dms — no flags", symbol.upper(), elapsed)
     return out
 
 
@@ -160,6 +172,9 @@ def portfolio_scan(
 
     symbols = [s.strip().upper() for s in symbols if s and s.strip()]
     workers = max(1, min(max_workers, len(symbols)))
+    started = time.perf_counter()
+    _log.info("portfolio_scan: %d symbols on %s — %s",
+              len(symbols), exchange, ", ".join(symbols[:6]) + (" …" if len(symbols) > 6 else ""))
     results: list[dict] = []
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
@@ -184,6 +199,9 @@ def portfolio_scan(
         "with_flags": len(flagged),
         "errors": sum(1 for r in ordered if "error" in r or "ta_error" in r),
     }
+    elapsed = time.perf_counter() - started
+    _log.info("portfolio_scan done in %.1fs — %d flagged, %d errored",
+              elapsed, summary["with_flags"], summary["errors"])
 
     return {
         "results": ordered,

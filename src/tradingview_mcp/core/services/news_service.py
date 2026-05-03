@@ -15,12 +15,16 @@ from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from typing import Optional
 
+from tradingview_mcp.core.services.log import get_logger
+
 # feedparser is bundled with agent-reach (installed globally)
 try:
     import feedparser
     _FEEDPARSER_AVAILABLE = True
 except ImportError:
     _FEEDPARSER_AVAILABLE = False
+
+_log = get_logger("news")
 
 # ─── Feed Catalog ─────────────────────────────────────────────────────────────
 
@@ -96,15 +100,27 @@ def fetch_news(
 
     feeds = RSS_FEEDS.get(category, RSS_FEEDS["stocks"])
     search_terms = _symbol_search_terms(symbol, category) if symbol else []
+    if symbol:
+        _log.info("searching news for %s in '%s' (terms: %s)",
+                  symbol.upper(), category, ", ".join(search_terms[:5]))
+    else:
+        _log.info("fetching news from '%s' feeds (%d sources)", category, len(feeds))
     results: list[dict] = []
     seen_titles: set[tuple[str, str]] = set()
+    skipped_dupes = 0
+    skipped_stale = 0
 
     def _try_add(item: dict) -> None:
         """Append *item* unless it's a (title, source) duplicate or stale."""
+        nonlocal skipped_dupes, skipped_stale
         key = (item["title"].strip().lower(), item["source"])
-        if not item["title"] or key in seen_titles:
+        if not item["title"]:
+            return
+        if key in seen_titles:
+            skipped_dupes += 1
             return
         if _is_stale(item["published"]):
+            skipped_stale += 1
             return
         seen_titles.add(key)
         results.append(item)
@@ -117,6 +133,7 @@ def fetch_news(
         if len(results) >= fetch_target:
             break
         try:
+            _log.debug("fetching feed: %s", feed_info["name"])
             feed = feedparser.parse(feed_info["url"])
             source_name = feed.feed.get("title", feed_info["name"])
 
@@ -140,13 +157,15 @@ def fetch_news(
                     "source": source_name,
                 })
 
-        except Exception:
+        except Exception as e:
+            _log.warning("feed %s failed: %s", feed_info["name"], e)
             continue
 
     # PAP Biznes has no RSS — synthesise feed from HTML scraper for pl_stocks.
     if category == "pl_stocks" and len(results) < fetch_target:
         try:
             from tradingview_mcp.core.services.pap_scraper import fetch_pap_items
+            _log.debug("topping up pl_stocks with PAP Biznes scraper")
             for item in fetch_pap_items(limit=15):
                 if len(results) >= fetch_target:
                     break
@@ -160,7 +179,10 @@ def fetch_news(
 
     # Phase 2: sort by freshness (newest first), then trim to *limit*.
     results.sort(key=lambda i: _parse_published(i["published"]) or _EPOCH, reverse=True)
-    return results[:limit]
+    final = results[:limit]
+    _log.info("news: %d items returned (filtered %d duplicates, %d stale)",
+              len(final), skipped_dupes, skipped_stale)
+    return final
 
 
 # ─── Date helpers ─────────────────────────────────────────────────────────────

@@ -28,6 +28,10 @@ import re
 import urllib.request
 from typing import Iterable
 
+from tradingview_mcp.core.services.log import get_logger
+
+_log = get_logger("pap")
+
 from tradingview_mcp.core.data.polish_diacritics import restore_diacritics
 from tradingview_mcp.core.services.proxy_manager import build_opener_with_proxy
 
@@ -107,9 +111,11 @@ def fetch_pap_items(limit: int = 30, with_dates: bool = True) -> list[dict]:
     HTTP fetch to populate ``published``. Cost: up to *limit* requests
     after the listing fetch. Set *with_dates=False* to skip (e.g. tests).
     """
+    _log.info("scraping PAP Biznes headlines (limit=%d)", limit)
     try:
         html = _fetch(_LISTING_URL)
-    except Exception:
+    except Exception as e:
+        _log.warning("PAP listing fetch failed: %s", e)
         return []
 
     seen: set[str] = set()
@@ -129,9 +135,11 @@ def fetch_pap_items(limit: int = 30, with_dates: bool = True) -> list[dict]:
             break
 
     if with_dates:
+        _log.debug("fetching publication dates for %d PAP articles", len(out))
         for item in out:
             item["published"] = _fetch_published(item["url"])
 
+    _log.info("PAP: collected %d articles", len(out))
     return out
 
 

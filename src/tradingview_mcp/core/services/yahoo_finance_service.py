@@ -21,7 +21,10 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from tradingview_mcp.core.services.cache import cached
+from tradingview_mcp.core.services.log import get_logger
 from tradingview_mcp.core.services.proxy_manager import build_opener_with_proxy
+
+_log = get_logger("yahoo")
 
 _TIMEOUT = 12
 _UA = "tradingview-mcp/0.5.0"
@@ -174,16 +177,20 @@ def _fetch_quote_summary(symbol: str, modules: list[str]) -> dict:
         with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:
             return json.loads(resp.read().decode("utf-8"))
 
+    _log.info("asking Yahoo Finance about %s (%s)", symbol.upper(), ", ".join(modules))
     if _CRUMB_CACHE["crumb"] is None:
+        _log.debug("bootstrapping Yahoo crumb token")
         _CRUMB_CACHE["crumb"], _CRUMB_CACHE["cookies"] = _bootstrap_crumb()
 
     try:
         data = _do_call(_CRUMB_CACHE["crumb"], _CRUMB_CACHE["cookies"])
     except urllib.error.HTTPError as e:
         if e.code in (401, 403):
+            _log.warning("Yahoo rejected our session (%s) — refreshing crumb and retrying", e.code)
             _CRUMB_CACHE["crumb"], _CRUMB_CACHE["cookies"] = _bootstrap_crumb()
             data = _do_call(_CRUMB_CACHE["crumb"], _CRUMB_CACHE["cookies"])
         else:
+            _log.warning("Yahoo HTTP %s for %s", e.code, symbol)
             raise
 
     result = data.get("quoteSummary", {}).get("result") or []

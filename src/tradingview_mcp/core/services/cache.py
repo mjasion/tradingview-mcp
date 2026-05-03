@@ -28,6 +28,10 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
+from tradingview_mcp.core.services.log import get_logger
+
+_log = get_logger("cache")
+
 _LOCK = threading.RLock()
 _STORE: dict[str, dict[str, Any]] | None = None  # lazy-loaded
 _LOADED_PATH: Path | None = None
@@ -87,6 +91,17 @@ def _make_key(namespace: str, args: tuple, kwargs: dict) -> str:
     return f"{namespace}:{digest}"
 
 
+def _call_label(args: tuple, kwargs: dict) -> str:
+    """Best-effort short label for log lines: usually the symbol/ticker."""
+    if args and isinstance(args[0], str):
+        return args[0]
+    if "symbol" in kwargs and isinstance(kwargs["symbol"], str):
+        return kwargs["symbol"]
+    if not args and not kwargs:
+        return "()"
+    return "(args)"
+
+
 def cached(ttl_seconds: int, namespace: str) -> Callable:
     """Decorator: cache function result on disk for ``ttl_seconds``.
 
@@ -99,18 +114,25 @@ def cached(ttl_seconds: int, namespace: str) -> Callable:
         def wrapper(*args, **kwargs):
             key = _make_key(namespace, args, kwargs)
             now = time.time()
+            label = _call_label(args, kwargs)
             with _LOCK:
                 store = _load()
                 entry = store.get(key)
                 if entry and entry.get("expires_at", 0) > now:
+                    age = int(now - (entry.get("expires_at", now) - ttl_seconds))
+                    _log.info("cache hit on %s for %s (%ds old)", namespace, label, age)
                     return entry["value"]
+            _log.info("cache miss on %s for %s — calling upstream", namespace, label)
             value = fn(*args, **kwargs)
             if isinstance(value, dict) and "error" in value:
+                _log.warning("not caching %s for %s — upstream returned error: %s",
+                             namespace, label, value.get("error"))
                 return value
             with _LOCK:
                 store = _load()
                 store[key] = {"expires_at": now + ttl_seconds, "value": value}
                 _persist()
+            _log.debug("cached %s for %s (TTL %ds)", namespace, label, ttl_seconds)
             return value
         wrapper.__cache_namespace__ = namespace  # type: ignore[attr-defined]
         return wrapper

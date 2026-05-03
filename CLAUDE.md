@@ -78,11 +78,20 @@ tests/unit/                            # pytest, all fast (no network)
 ## Running locally
 
 ```bash
-uv run tradingview-mcp                    # streamable-http on :8000
-uv run tradingview-mcp stdio              # for Claude Desktop / similar
-uv run pytest -q                          # 116 tests, ~50ms, no network
-docker compose up -d                      # full stack with autoheal sidecar
+uv run tradingview-mcp                                 # streamable-http on :8000
+uv run tradingview-mcp stdio                           # for Claude Desktop / similar
+TRADINGVIEW_MCP_LOG_LEVEL=DEBUG uv run tradingview-mcp # verbose logs to stderr
+uv run pytest -q                                       # tests, ~50ms, no network
+docker compose up -d                                   # full stack with autoheal sidecar
 ```
+
+Logs go to **stderr** (stdout is reserved for the MCP transport on stdio).
+Default level is `INFO` and produces a narrative line per upstream call
+(`asking Yahoo Finance about AAPL`, `cache hit on sec_insider for AAPL …`).
+Set `TRADINGVIEW_MCP_LOG_LEVEL` to `DEBUG` for per-feed/per-screener detail
+or `WARNING` to silence routine activity. Cache directory is configurable
+via `TRADINGVIEW_MCP_CACHE_DIR` (defaults to a per-user dir; the Docker
+image pins it to `/var/cache/tradingview-mcp` on a named volume).
 
 Sandbox: `stooq.com` is on the allowed-host list. Other external HTTP
 hosts may need `dangerouslyDisableSandbox: true` for ad-hoc probes.

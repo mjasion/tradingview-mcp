@@ -31,6 +31,9 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from tradingview_mcp.core.services.cache import cached
+from tradingview_mcp.core.services.log import get_logger
+
+_log = get_logger("sec")
 
 _TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
 _SUBMISSIONS_BASE = "https://data.sec.gov/submissions"
@@ -51,6 +54,7 @@ def _http_json(url: str) -> dict:
 @cached(ttl_seconds=604800, namespace="sec_ticker_map")  # 7 days
 def _load_ticker_map() -> dict[str, dict]:
     """Build lowercase-ticker → ``{cik, name}`` map. Cached for a week."""
+    _log.info("loading SEC EDGAR ticker → CIK map (this happens once a week)")
     raw = _http_json(_TICKERS_URL)
     out: dict[str, dict] = {}
     for entry in raw.values():
@@ -106,10 +110,12 @@ def get_insider_transactions(symbol: str, limit: int = 10) -> dict:
     out["cik"] = cik
     out["name"] = info["name"]
 
+    _log.info("fetching SEC filings for %s (%s, CIK %d)", symbol.upper(), info["name"], cik)
     url = f"{_SUBMISSIONS_BASE}/CIK{cik:010d}.json"
     try:
         body = _http_json(url)
     except Exception as e:
+        _log.warning("SEC EDGAR failed for %s: %s", symbol.upper(), e)
         return {**out, "error": f"{type(e).__name__}: {e}"}
 
     recent = body.get("filings", {}).get("recent", {}) or {}
@@ -132,9 +138,11 @@ def get_insider_transactions(symbol: str, limit: int = 10) -> dict:
         if len(filings) >= limit:
             break
 
+    total = sum(1 for f in forms if f == "4")
+    _log.info("SEC: %s has %d Form 4 filings, returning %d", symbol.upper(), total, len(filings))
     return {
         **out,
         "filings": filings,
-        "count": sum(1 for f in forms if f == "4"),
+        "count": total,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }

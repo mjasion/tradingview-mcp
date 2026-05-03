@@ -15,7 +15,10 @@ import urllib.parse
 from datetime import datetime, timezone
 from typing import Optional
 
+from tradingview_mcp.core.services.log import get_logger
 from tradingview_mcp.core.services.proxy_manager import build_opener_with_proxy, is_proxy_configured
+
+_log = get_logger("reddit")
 
 # ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -107,6 +110,8 @@ def analyze_sentiment(
     """
     subs = SUBREDDIT_GROUPS.get(category, SUBREDDIT_GROUPS["all"])
     per_sub = max(2, limit // len(subs) + 1)
+    _log.info("scanning Reddit for %s across %d subreddits (%s)",
+              symbol.upper(), len(subs), ", ".join(f"r/{s}" for s in subs[:4]))
 
     all_posts: list[dict] = []
     scores: list[float] = []
@@ -115,14 +120,17 @@ def analyze_sentiment(
     # permalink so a single post does not double-count toward bullish/bearish
     # tallies or appear twice in top_posts.
     seen_permalinks: set[str] = set()
+    skipped_dupes = 0
 
     for sub in subs:
         raw = _fetch_reddit_posts(sub, symbol, per_sub)
+        _log.debug("r/%s: %d raw posts", sub, len(raw))
         for p in raw:
             d = p.get("data", {})
             permalink = d.get("permalink", "")
             dedup_key = permalink or d.get("id", "")
             if dedup_key and dedup_key in seen_permalinks:
+                skipped_dupes += 1
                 continue
             if dedup_key:
                 seen_permalinks.add(dedup_key)
@@ -143,6 +151,8 @@ def analyze_sentiment(
     # Aggregate
     avg = sum(scores) / len(scores) if scores else 0.0
     all_posts.sort(key=lambda x: x["upvotes"], reverse=True)
+    _log.info("Reddit %s: %d posts analysed, %d cross-posts deduped — sentiment %.2f (%s)",
+              symbol.upper(), len(scores), skipped_dupes, avg, _label(avg))
 
     return {
         "symbol": symbol.upper(),

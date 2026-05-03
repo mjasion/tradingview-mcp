@@ -15,6 +15,12 @@ import os
 
 from mcp.server.fastmcp import FastMCP
 
+# Initialise the human-readable logger BEFORE importing services so they
+# attach to a configured handler (otherwise the first call gets a default
+# Python WARNING-only root logger).
+from tradingview_mcp.core.services.log import setup as _setup_logging, log_tool_call as _log_call
+_setup_logging()
+
 # ── Service imports ────────────────────────────────────────────────────────────
 from tradingview_mcp.core.services.coinlist import load_symbols
 from tradingview_mcp.core.services.screener_service import (
@@ -166,6 +172,7 @@ def coin_analysis(symbol: str, exchange: str = "KUCOIN", timeframe: str = "15m")
     """
     exchange = sanitize_exchange(exchange, "KUCOIN")
     timeframe = sanitize_timeframe(timeframe, "15m")
+    _log_call("coin_analysis", symbol=symbol, exchange=exchange, timeframe=timeframe)
     return analyze_coin(symbol, exchange, timeframe)
 
 
@@ -739,6 +746,7 @@ def commodity_snapshot() -> dict:
 
     Source: TradingView (free public endpoint via tradingview-ta).
     """
+    _log_call("commodity_snapshot")
     return get_commodity_snapshot()
 
 
@@ -760,6 +768,7 @@ def next_earnings(symbol: str) -> dict:
         ``{symbol, next_earnings_date, days_until, history: [...], source}``
         — or ``{symbol, error, source}`` on rate-limit / coverage gap.
     """
+    _log_call("next_earnings", symbol=symbol)
     return get_earnings(symbol)
 
 
@@ -776,6 +785,7 @@ def dividend_history(symbol: str) -> dict:
         payout_ratio, five_year_avg_yield, last_dividend_value/date, source}``
         — or ``{symbol, error, source}`` on rate-limit / coverage gap.
     """
+    _log_call("dividend_history", symbol=symbol)
     return get_dividends(symbol)
 
 
@@ -798,6 +808,7 @@ def insider_transactions(symbol: str, limit: int = 10) -> dict:
         question can drill into the transaction breakdown.
         On unknown ticker / network error returns an ``error`` field.
     """
+    _log_call("insider_transactions", symbol=symbol, limit=limit)
     return get_insider_transactions(symbol, limit=limit)
 
 
@@ -831,6 +842,8 @@ def portfolio_scan(
     Returns:
         ``{results: [{symbol, price, rsi, flags, ...}], summary, source}``.
     """
+    _log_call("portfolio_scan", symbols=symbols, exchange=exchange,
+              timeframe=timeframe, include_insider=include_insider)
     return _portfolio_scan(
         symbols, exchange=exchange, timeframe=timeframe,
         news_category=news_category, include_insider=include_insider,

@@ -28,6 +28,9 @@ from __future__ import annotations
 from typing import Optional
 
 from tradingview_mcp.core.services.cache import cached
+from tradingview_mcp.core.services.log import get_logger
+
+_log = get_logger("commodity")
 
 try:
     from tradingview_ta import get_multiple_analysis  # type: ignore
@@ -112,6 +115,8 @@ def get_commodity_snapshot() -> dict:
         out["error"] = "tradingview_ta not installed"
         return out
 
+    _log.info("building commodity dashboard (%d symbols)", len(_COMMODITIES))
+
     # Group by screener — one TA call per screener.
     by_screener: dict[str, list[tuple[str, str]]] = {}
     for label, (sym, screener) in _COMMODITIES.items():
@@ -119,11 +124,13 @@ def get_commodity_snapshot() -> dict:
 
     for screener, items in by_screener.items():
         symbols = [sym for _, sym in items]
+        _log.debug("querying TradingView '%s' screener for %d symbols", screener, len(symbols))
         try:
             analysis = get_multiple_analysis(
                 screener=screener, interval=_TIMEFRAME, symbols=symbols
             )
         except Exception as e:
+            _log.warning("TradingView %s screener failed: %s", screener, e)
             out.setdefault("errors", []).append(
                 f"{screener}: {type(e).__name__}: {e}"
             )
@@ -138,6 +145,10 @@ def get_commodity_snapshot() -> dict:
             except Exception:
                 continue
 
+    populated = sum(1 for v in out["commodities"].values() if v)
     if not any(out["commodities"].values()):
         out["error"] = "all commodity symbols returned no data"
+        _log.warning("commodity dashboard: 0/%d symbols returned data", len(out["commodities"]))
+    else:
+        _log.info("commodity dashboard: %d/%d symbols populated", populated, len(out["commodities"]))
     return out
