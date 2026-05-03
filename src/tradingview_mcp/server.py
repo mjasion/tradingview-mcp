@@ -58,6 +58,10 @@ from tradingview_mcp.core.services.yahoo_finance_service import (
 from tradingview_mcp.core.services.stooq_service import get_price as stooq_get_price
 from tradingview_mcp.core.services.bitcoin_market_service import get_bitcoin_market_pulse
 from tradingview_mcp.core.services.commodity_service import get_commodity_snapshot
+from tradingview_mcp.core.services.beta_etf_scraper import (
+    get_etf_nav as _get_etf_nav,
+    supported_tickers as _beta_etf_tickers,
+)
 from tradingview_mcp.core.services.sec_service import get_insider_transactions
 from tradingview_mcp.core.services.portfolio_service import portfolio_scan as _portfolio_scan
 from tradingview_mcp.core.services.backtest_service import (
@@ -173,7 +177,23 @@ def coin_analysis(symbol: str, exchange: str = "KUCOIN", timeframe: str = "15m")
     exchange = sanitize_exchange(exchange, "KUCOIN")
     timeframe = sanitize_timeframe(timeframe, "15m")
     _log_call("coin_analysis", symbol=symbol, exchange=exchange, timeframe=timeframe)
-    return analyze_coin(symbol, exchange, timeframe)
+    result = analyze_coin(symbol, exchange, timeframe)
+
+    # Closed-end fund NAV: only meaningful signal for BETA ETFs on GPW.
+    # Comparing market price (in result) to NAV reveals premium/discount.
+    if exchange.lower() in _GPW_EXCHANGES and isinstance(result, dict):
+        sym_upper = symbol.strip().upper()
+        if sym_upper in _beta_etf_tickers():
+            nav = _get_etf_nav(sym_upper)
+            if "error" not in nav:
+                price = (result.get("price_data") or {}).get("current_price")
+                if isinstance(price, (int, float)) and nav.get("nav"):
+                    nav["premium_discount_pct"] = round(
+                        ((price - nav["nav"]) / nav["nav"]) * 100, 2
+                    )
+            result["etf_nav"] = nav
+
+    return result
 
 
 # ── Candle pattern tools ───────────────────────────────────────────────────────
