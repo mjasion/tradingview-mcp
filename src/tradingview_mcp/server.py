@@ -52,6 +52,8 @@ from tradingview_mcp.core.services.yahoo_finance_service import (
 from tradingview_mcp.core.services.stooq_service import get_price as stooq_get_price
 from tradingview_mcp.core.services.bitcoin_market_service import get_bitcoin_market_pulse
 from tradingview_mcp.core.services.commodity_service import get_commodity_snapshot
+from tradingview_mcp.core.services.sec_service import get_insider_transactions
+from tradingview_mcp.core.services.portfolio_service import portfolio_scan as _portfolio_scan
 from tradingview_mcp.core.services.backtest_service import (
     run_backtest,
     compare_strategies as _compare_strategies,
@@ -775,6 +777,64 @@ def dividend_history(symbol: str) -> dict:
         — or ``{symbol, error, source}`` on rate-limit / coverage gap.
     """
     return get_dividends(symbol)
+
+
+@mcp.tool()
+def insider_transactions(symbol: str, limit: int = 10) -> dict:
+    """Recent insider trades (SEC Form 4) for a US-listed stock.
+
+    Form 4 captures insider buys/sells (officers, directors, 10%+ holders).
+    Useful as a fundamental signal — "the CFO just bought 50k shares" is
+    a different setup than "three directors trimmed positions in two weeks".
+
+    Args:
+        symbol: US ticker tracked by SEC EDGAR (AAPL, MSFT, TSLA, NVDA…).
+                Non-US tickers (GPW .WA, .IS, .L, .DE) are NOT covered.
+        limit:  Max recent Form-4 filings to return (default 10).
+
+    Returns:
+        ``{symbol, cik, name, filings: [{date, accession, url}], count, source}``
+        Each ``url`` links to the filing landing page on sec.gov so a follow-up
+        question can drill into the transaction breakdown.
+        On unknown ticker / network error returns an ``error`` field.
+    """
+    return get_insider_transactions(symbol, limit=limit)
+
+
+@mcp.tool()
+def portfolio_scan(
+    symbols: list[str],
+    exchange: str = "NASDAQ",
+    timeframe: str = "1D",
+    news_category: str = "stocks",
+    include_insider: bool = False,
+) -> dict:
+    """Batch-scan a watchlist for things worth your attention right now.
+
+    For each symbol fans out (in parallel) calls to TA + earnings + dividends
+    + recent news, then surfaces compact ``flags`` such as ``rsi_overbought``,
+    ``earnings_in_3d``, ``ex_dividend_in_5d``, ``volatility_high``,
+    ``news_active(8)``.
+
+    Use this instead of looping ``coin_analysis`` + ``next_earnings`` +
+    ``dividend_history`` per symbol — one call returns the full dashboard.
+
+    Args:
+        symbols: tickers to scan (e.g. ``["AAPL","MSFT","NVDA"]``).
+        exchange: exchange routing — ``NASDAQ``, ``NYSE``, ``GPW``, ``BIST``…
+        timeframe: TA timeframe (``5m``..``1M``); default ``1D``.
+        news_category: feed group — ``"stocks"`` for US, ``"pl_stocks"`` for GPW,
+                       ``"crypto"`` for crypto, ``"all"`` to merge.
+        include_insider: when True, also fetch SEC Form-4 counts (US only,
+                         adds ~1s/symbol, off by default).
+
+    Returns:
+        ``{results: [{symbol, price, rsi, flags, ...}], summary, source}``.
+    """
+    return _portfolio_scan(
+        symbols, exchange=exchange, timeframe=timeframe,
+        news_category=news_category, include_insider=include_insider,
+    )
 
 
 @mcp.tool()

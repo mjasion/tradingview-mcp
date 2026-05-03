@@ -9,6 +9,12 @@ services:
     environment:
       - PORT=8000
       - HOST=0.0.0.0
+      # Persist Yahoo / SEC / commodity cache across container restarts.
+      # Without this the JSON cache lives only inside the container's writable
+      # layer and is wiped by `docker compose down`.
+      - TRADINGVIEW_MCP_CACHE_DIR=/var/cache/tradingview-mcp
+    volumes:
+      - cache:/var/cache/tradingview-mcp
     labels:
       - autoheal=true
     healthcheck:
@@ -35,3 +41,6 @@ services:
       - AUTOHEAL_START_PERIOD=30
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+
+volumes:
+  cache:

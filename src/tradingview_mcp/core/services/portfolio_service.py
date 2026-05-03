@@ -1,0 +1,193 @@
+"""Portfolio / watchlist scan — orchestration over existing services.
+
+Why this exists: a "should I add to my positions?" question normally needs
+4×N tool calls (TA, earnings, dividends, news per ticker). This tool batches
+the same lookups and returns one compact dict with red-flag flags per symbol,
+so Claude can cite "AAPL: RSI 78 (overbought), earnings in 3 days, ex-div in
+9 days" in a single round-trip.
+
+No new data sources. All calls go to existing services:
+  * ``screener_service.analyze_coin`` — TA (RSI, BB, ATR, change %)
+  * ``yahoo_finance_service.get_earnings`` — next earnings date
+  * ``yahoo_finance_service.get_dividends`` — next ex-dividend
+  * ``news_service.fetch_news_summary`` — recent news count
+  * ``sec_service.get_insider_transactions`` — Form 4 count (US only)
+
+Per-symbol fan-out runs in a thread pool — each call is I/O-bound. Results
+that fail (rate-limit, unknown ticker) appear as ``error`` on that symbol's
+sub-dict and do NOT block the rest of the scan.
+"""
+from __future__ import annotations
+
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timezone
+from typing import Optional
+
+from tradingview_mcp.core.services.news_service import fetch_news_summary
+from tradingview_mcp.core.services.screener_service import analyze_coin
+from tradingview_mcp.core.services.sec_service import get_insider_transactions
+from tradingview_mcp.core.services.yahoo_finance_service import (
+    get_dividends,
+    get_earnings,
+)
+
+
+_DEFAULT_WORKERS = 6
+_RSI_OVERBOUGHT = 70.0
+_RSI_OVERSOLD = 30.0
+_EARNINGS_HORIZON_DAYS = 7
+_EX_DIV_HORIZON_DAYS = 14
+
+
+def _flags(ta: dict, earnings: dict, dividends: dict, news_count: int) -> list[str]:
+    flags: list[str] = []
+    rsi_val = (ta.get("rsi") or {}).get("value")
+    if isinstance(rsi_val, (int, float)):
+        if rsi_val >= _RSI_OVERBOUGHT:
+            flags.append(f"rsi_overbought({rsi_val:.0f})")
+        elif rsi_val <= _RSI_OVERSOLD:
+            flags.append(f"rsi_oversold({rsi_val:.0f})")
+
+    bb_pos = (ta.get("bollinger_bands") or {}).get("position")
+    if bb_pos == "Above Upper Band":
+        flags.append("bb_above_upper")
+    elif bb_pos == "Below Lower Band":
+        flags.append("bb_below_lower")
+
+    vol = (ta.get("atr") or {}).get("volatility")
+    if vol == "High":
+        flags.append("volatility_high")
+
+    days_until = earnings.get("days_until")
+    if isinstance(days_until, int) and 0 <= days_until <= _EARNINGS_HORIZON_DAYS:
+        flags.append(f"earnings_in_{days_until}d")
+
+    next_ex = dividends.get("next_ex_date")
+    if isinstance(next_ex, str):
+        try:
+            d = datetime.fromisoformat(next_ex).date()
+            today = datetime.now(timezone.utc).date()
+            delta = (d - today).days
+            if 0 <= delta <= _EX_DIV_HORIZON_DAYS:
+                flags.append(f"ex_dividend_in_{delta}d")
+        except ValueError:
+            pass
+
+    if news_count >= 5:
+        flags.append(f"news_active({news_count})")
+
+    return flags
+
+
+def _scan_one(
+    symbol: str,
+    exchange: str,
+    timeframe: str,
+    news_category: str,
+    include_insider: bool,
+) -> dict:
+    """Run all per-symbol lookups serially inside a worker thread."""
+    out: dict = {"symbol": symbol.upper()}
+
+    ta = analyze_coin(symbol, exchange, timeframe)
+    if "error" in ta:
+        out["ta_error"] = ta["error"]
+        ta = {}
+    else:
+        out["price"] = (ta.get("price_data") or {}).get("current_price")
+        out["change_pct"] = (ta.get("price_data") or {}).get("change_percent")
+        out["rsi"] = (ta.get("rsi") or {}).get("value")
+        out["volatility"] = (ta.get("atr") or {}).get("volatility")
+        out["rating"] = (ta.get("market_sentiment") or {}).get("overall_rating")
+
+    earnings = get_earnings(symbol)
+    if "error" not in earnings:
+        out["next_earnings_date"] = earnings.get("next_earnings_date")
+        out["earnings_days_until"] = earnings.get("days_until")
+    else:
+        out["earnings_error"] = earnings["error"]
+
+    dividends = get_dividends(symbol)
+    if "error" not in dividends:
+        out["dividend_yield"] = dividends.get("dividend_yield")
+        out["next_ex_date"] = dividends.get("next_ex_date")
+    else:
+        out["dividend_error"] = dividends["error"]
+
+    news_count = 0
+    try:
+        news = fetch_news_summary(category=news_category, symbol=symbol, limit=20)
+        if isinstance(news, dict):
+            news_count = int(news.get("count") or len(news.get("items") or []))
+            out["news_count"] = news_count
+    except Exception as e:
+        out["news_error"] = f"{type(e).__name__}: {e}"
+
+    if include_insider:
+        ins = get_insider_transactions(symbol, limit=5)
+        if "error" not in ins:
+            out["insider_form4_count"] = ins.get("count")
+            out["insider_recent"] = [f["date"] for f in (ins.get("filings") or [])[:3]]
+
+    out["flags"] = _flags(ta, earnings if "error" not in earnings else {},
+                          dividends if "error" not in dividends else {},
+                          news_count)
+    return out
+
+
+def portfolio_scan(
+    symbols: list[str],
+    exchange: str = "NASDAQ",
+    timeframe: str = "1D",
+    news_category: str = "stocks",
+    include_insider: bool = False,
+    max_workers: int = _DEFAULT_WORKERS,
+) -> dict:
+    """Batch-scan a watchlist. Returns ``{results: [...], summary, source}``.
+
+    ``flags`` per symbol surface the things you actually care about:
+      * ``rsi_overbought`` / ``rsi_oversold``
+      * ``bb_above_upper`` / ``bb_below_lower``
+      * ``volatility_high``
+      * ``earnings_in_<N>d`` (only when 0 ≤ N ≤ 7)
+      * ``ex_dividend_in_<N>d`` (only when 0 ≤ N ≤ 14)
+      * ``news_active(<count>)``
+
+    ``include_insider=True`` adds Form 4 counts (US-only, slow). Off by default.
+    """
+    if not symbols:
+        return {"results": [], "summary": {"scanned": 0}, "source": "portfolio_scan"}
+
+    symbols = [s.strip().upper() for s in symbols if s and s.strip()]
+    workers = max(1, min(max_workers, len(symbols)))
+    results: list[dict] = []
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {
+            pool.submit(_scan_one, sym, exchange, timeframe, news_category, include_insider): sym
+            for sym in symbols
+        }
+        for fut in as_completed(futures):
+            sym = futures[fut]
+            try:
+                results.append(fut.result())
+            except Exception as e:
+                results.append({"symbol": sym, "error": f"{type(e).__name__}: {e}", "flags": []})
+
+    # Stable, deterministic order (input order)
+    by_sym = {r["symbol"]: r for r in results}
+    ordered = [by_sym[s] for s in symbols if s in by_sym]
+
+    flagged = [r for r in ordered if r.get("flags")]
+    summary = {
+        "scanned": len(ordered),
+        "with_flags": len(flagged),
+        "errors": sum(1 for r in ordered if "error" in r or "ta_error" in r),
+    }
+
+    return {
+        "results": ordered,
+        "summary": summary,
+        "source": "portfolio_scan",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }

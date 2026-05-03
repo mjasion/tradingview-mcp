@@ -27,8 +27,12 @@ COPY --from=builder /usr/local/bin/tradingview-mcp /usr/local/bin/tradingview-mc
 # Copy app source (needed for coinlist data files etc.)
 COPY --from=builder /app /app
 
-# Create non-root user for security
-RUN useradd -m mcpuser && chown -R mcpuser:mcpuser /app
+# Create non-root user for security and pre-create the cache directory.
+# When docker-compose mounts a named volume here, Docker propagates these
+# permissions on first mount — without this mcpuser hits PermissionError.
+RUN useradd -m mcpuser \
+    && mkdir -p /var/cache/tradingview-mcp \
+    && chown -R mcpuser:mcpuser /app /var/cache/tradingview-mcp
 USER mcpuser
 
 # Expose the HTTP port

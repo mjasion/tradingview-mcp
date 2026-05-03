@@ -20,6 +20,7 @@ import urllib.request
 from datetime import datetime, timezone
 from typing import Optional
 
+from tradingview_mcp.core.services.cache import cached
 from tradingview_mcp.core.services.proxy_manager import build_opener_with_proxy
 
 _TIMEOUT = 12
@@ -201,6 +202,7 @@ def _ts_to_iso(ts: Optional[int]) -> Optional[str]:
         return None
 
 
+@cached(ttl_seconds=21600, namespace="yahoo_earnings")  # 6h
 def get_earnings(symbol: str) -> dict:
     """Earnings calendar + recent surprise history for *symbol*.
 
@@ -250,6 +252,7 @@ def get_earnings(symbol: str) -> dict:
     }
 
 
+@cached(ttl_seconds=86400, namespace="yahoo_dividends")  # 24h
 def get_dividends(symbol: str) -> dict:
     """Forward dividend metrics + ex-date for *symbol*.
 

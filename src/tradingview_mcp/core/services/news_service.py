@@ -41,12 +41,15 @@ RSS_FEEDS: dict[str, list[dict]] = {
     # Polish stock market. RSS feeds verified live (May 2026); PAP Biznes is
     # added as an HTML scraper (see pap_scraper.py) because biznes.pap.pl
     # exposes no public RSS. Verified MISS / no public RSS: parkiet.com,
-    # biznesradar.pl, stooq.pl/n, forsal, wnp, strefainwestorow, rp.pl/biznes.
+    # biznesradar.pl, stooq.pl/n, forsal, wnp, strefainwestorow, rp.pl/biznes,
+    # gpwalert.com, infostrefa.com (cert expired), pb.pl (HTML at /rss),
+    # gpw.pl (HTML at /rss).
     "pl_stocks": [
-        {"url": "https://www.bankier.pl/rss/wiadomosci.xml", "name": "Bankier.pl"},
-        {"url": "https://www.money.pl/rss/gielda.xml",       "name": "Money.pl Giełda"},
-        {"url": "https://www.money.pl/rss/news.xml",         "name": "Money.pl"},
-        {"url": "https://comparic.pl/feed/",                 "name": "Comparic.pl"},
+        {"url": "https://www.bankier.pl/rss/wiadomosci.xml",   "name": "Bankier.pl"},
+        {"url": "https://www.money.pl/rss/gielda.xml",         "name": "Money.pl Giełda"},
+        {"url": "https://www.money.pl/rss/news.xml",           "name": "Money.pl"},
+        {"url": "https://comparic.pl/feed/",                   "name": "Comparic.pl"},
+        {"url": "https://www.stockwatch.pl/wiadomosci/feed",   "name": "StockWatch.pl"},
         # PAP Biznes — HTML scraper, attached after the RSS loop in fetch_news()
     ],
 }

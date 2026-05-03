@@ -27,6 +27,8 @@ from __future__ import annotations
 
 from typing import Optional
 
+from tradingview_mcp.core.services.cache import cached
+
 try:
     from tradingview_ta import get_multiple_analysis  # type: ignore
     _TA_AVAILABLE = True
@@ -38,6 +40,8 @@ _TIMEFRAME = "1d"
 
 # Display key → (TradingView symbol, screener).
 # KGHM (copper) and Orlen (oil) drive most Polish-market questions.
+# Steel/iron-ore proxies cover JSW (coking coal) thesis since the free TV
+# endpoint exposes no clean spot symbol for those — only equity proxies work.
 _COMMODITIES: dict[str, tuple[str, str]] = {
     "copper":     ("OANDA:XCUUSD",   "cfd"),       # KGHM proxy
     "gold":       ("TVC:GOLD",       "cfd"),       # safe-haven flow
@@ -46,6 +50,10 @@ _COMMODITIES: dict[str, tuple[str, str]] = {
     "oil_wti":    ("AMEX:USO",       "america"),   # WTI ETF proxy
     "oil_brent":  ("AMEX:BNO",       "america"),   # Brent ETF proxy
     "dxy":        ("TVC:DXY",        "cfd"),       # USD index — context for all of the above
+    "steel":      ("AMEX:SLX",       "america"),   # VanEck Steel ETF — JSW/coking-coal proxy
+    "metals_mining": ("AMEX:XME",    "america"),   # SPDR Metals & Mining ETF — broad miner basket
+    "iron_ore":   ("NYSE:VALE",      "america"),   # Vale equity — largest iron-ore exporter
+    "us_steel":   ("NYSE:CLF",       "america"),   # Cleveland-Cliffs — flat-rolled steel + HRC pricing signal
 }
 
 
@@ -78,6 +86,7 @@ def _row(ind: dict) -> dict:
     }
 
 
+@cached(ttl_seconds=900, namespace="commodity_snapshot")  # 15min
 def get_commodity_snapshot() -> dict:
     """Bulk-fetch commodity dashboard. Never raises.
 
@@ -93,8 +102,9 @@ def get_commodity_snapshot() -> dict:
         "notes": [
             "oil_wti / oil_brent are ETF proxies (AMEX:USO, AMEX:BNO). "
             "Daily-change correlation with spot crude > 0.95.",
-            "coking_coal: no free spot CFD on TradingView — JSW thesis "
-            "must rely on steel/iron-ore proxies or paid futures feed.",
+            "steel / metals_mining / iron_ore / us_steel are equity proxies — "
+            "no spot HRC or iron-ore symbol is exposed on the free TV endpoint. "
+            "For JSW (coking coal): steel + us_steel are the closest signal.",
         ],
     }
 
@@ -128,4 +138,6 @@ def get_commodity_snapshot() -> dict:
             except Exception:
                 continue
 
+    if not any(out["commodities"].values()):
+        out["error"] = "all commodity symbols returned no data"
     return out
