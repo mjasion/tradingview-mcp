@@ -47,6 +47,7 @@ from tradingview_mcp.core.services.yahoo_finance_service import (
     get_price,
     get_market_snapshot,
 )
+from tradingview_mcp.core.services.stooq_service import get_price as stooq_get_price
 from tradingview_mcp.core.services.bitcoin_market_service import get_bitcoin_market_pulse
 from tradingview_mcp.core.services.backtest_service import (
     run_backtest,
@@ -465,38 +466,105 @@ def market_sentiment(symbol: str, category: str = "all", limit: int = 20) -> dic
     return analyze_sentiment(symbol, category, limit)
 
 
+_GPW_EXCHANGES = {"gpw", "wse"}
+_CRYPTO_EXCHANGES = {"binance", "kucoin", "bybit", "mexc", "bitget", "okx",
+                     "coinbase", "gateio", "huobi", "bitfinex", "kraken", "bitstamp"}
+
+
+def _news_category_for_exchange(exchange: str) -> str:
+    """Pick the RSS feed group for a given exchange.
+
+    GPW → Polish-language feeds (Bankier, Money.pl, Comparic) — TradingView's
+    English/Reuters feeds rarely cover Polish small/mid caps.
+    Crypto exchanges → "crypto". Everything else → "stocks".
+    """
+    ex = exchange.strip().lower()
+    if ex in _GPW_EXCHANGES:
+        return "pl_stocks"
+    if ex in _CRYPTO_EXCHANGES:
+        return "crypto"
+    return "stocks"
+
+
 @mcp.tool()
-def financial_news(symbol: str = None, category: str = "stocks", limit: int = 10) -> dict:
-    """Real-time financial news from RSS feeds (Reuters, CoinDesk, etc.)
+def financial_news(
+    symbol: str = None,
+    category: str = "stocks",
+    limit: int = 10,
+    exchange: str = None,
+) -> dict:
+    """Real-time financial news from RSS feeds.
 
     Args:
-        symbol: Optional symbol filter ("AAPL", "BTC"). None = all news.
-        category: Feed category ("crypto", "stocks", "all")
+        symbol: Optional symbol filter ("AAPL", "BTC", "KGH"). None = all news.
+        category: Feed category ("crypto", "stocks", "pl_stocks", "all").
+                  Ignored if ``exchange`` is provided.
         limit: Max number of news items
+        exchange: Optional exchange code. When given, overrides ``category``:
+                  GPW/WSE → "pl_stocks", crypto exchanges → "crypto",
+                  everything else → "stocks". For Polish tickers the symbol
+                  is automatically expanded to company-name aliases (KGH →
+                  "KGHM" / "Polska Miedź").
     """
-    return fetch_news_summary(symbol, category, limit)
+    effective_category = _news_category_for_exchange(exchange) if exchange else category
+    return fetch_news_summary(symbol, effective_category, limit)
 
 
 @mcp.tool()
 def combined_analysis(symbol: str, exchange: str = "NASDAQ", timeframe: str = "1D") -> dict:
-    """POWER TOOL: TradingView technical analysis + Reddit sentiment + Financial news.
+    """POWER TOOL: TradingView technical analysis + sentiment + Financial news.
+
+    For US/EU/Asia-Pacific exchanges, sentiment uses Reddit.
+    For GPW/WSE (Warsaw), Reddit is skipped (poor Polish coverage) and news is
+    pulled from Polish-language feeds (Bankier, Money.pl, Comparic) instead.
 
     Args:
-        symbol: Asset symbol ("AAPL", "BTCUSDT", "THYAO", "GDX")
-        exchange: Exchange (NASDAQ, NYSE, AMEX, NYSEARCA, PCX, BINANCE, KUCOIN, MEXC, BIST, EGX, TWSE, TPEX)
+        symbol: Asset symbol ("AAPL", "BTCUSDT", "KGH", "SAP")
+        exchange: Exchange code (NASDAQ, NYSE, AMEX, GPW, XETRA, LSE, TSX,
+                  EURONEXT, MIL, BME, SIX, OSL, OMXSTO, TSE, KRX,
+                  BINANCE, KUCOIN, ...)
         timeframe: Analysis timeframe (5m, 15m, 1h, 4h, 1D, 1W)
     """
-    tech = coin_analysis(symbol, exchange, timeframe)
-    cat = "crypto" if exchange.upper() in ["BINANCE", "KUCOIN", "BYBIT", "MEXC"] else "stocks"
-    sentiment = analyze_sentiment(symbol, category=cat)
-    news = fetch_news_summary(symbol, category=cat, limit=5)
+    ex_lower = exchange.strip().lower()
+    is_gpw = ex_lower in _GPW_EXCHANGES
+    is_crypto = ex_lower in _CRYPTO_EXCHANGES
 
-    tech_momentum = tech.get("market_sentiment", {}).get("momentum", "") if isinstance(tech, dict) else ""
-    tech_bullish = tech_momentum == "Bullish"
-    sent_bullish = sentiment.get("sentiment_score", 0) > 0.1
-    signals_agree = tech_bullish == sent_bullish
-    confidence = "HIGH" if signals_agree else "MIXED"
-    tech_signal = tech.get("market_sentiment", {}).get("buy_sell_signal", "N/A") if isinstance(tech, dict) else "N/A"
+    tech = coin_analysis(symbol, exchange, timeframe)
+    news_category = _news_category_for_exchange(exchange)
+    news = fetch_news_summary(symbol, category=news_category, limit=5)
+
+    if is_gpw:
+        sentiment = {
+            "skipped": True,
+            "reason": (
+                "Reddit ma znikomy ruch o spółkach z GPW; liczby są niereprezentatywne. "
+                "Sentyment dla polskich spółek lepiej oceniać przez polskie źródła "
+                "(bankier.pl, parkiet.com, biznesradar.pl, gpw.pl/ESPI)."
+            ),
+            "fallback": "rss_pl",
+            "fallback_news_count": news.get("count", 0),
+        }
+        signals_agree = None
+        confidence = "TECHNICAL_ONLY"
+        recommendation = (
+            f"Technical {tech.get('market_sentiment', {}).get('buy_sell_signal', 'N/A') if isinstance(tech, dict) else 'N/A'} "
+            f"— sentiment skipped for GPW, see Polish RSS news ({news.get('count', 0)} headlines)"
+        )
+    else:
+        sent_cat = "crypto" if is_crypto else "stocks"
+        sentiment = analyze_sentiment(symbol, category=sent_cat)
+        tech_momentum = tech.get("market_sentiment", {}).get("momentum", "") if isinstance(tech, dict) else ""
+        tech_bullish = tech_momentum == "Bullish"
+        sent_bullish = sentiment.get("sentiment_score", 0) > 0.1
+        signals_agree = tech_bullish == sent_bullish
+        confidence = "HIGH" if signals_agree else "MIXED"
+        tech_signal = tech.get("market_sentiment", {}).get("buy_sell_signal", "N/A") if isinstance(tech, dict) else "N/A"
+        recommendation = (
+            f"Technical {tech_signal} "
+            f"{'confirmed by' if signals_agree else 'conflicts with'} "
+            f"{sentiment.get('sentiment_label', 'Neutral')} Reddit sentiment "
+            f"({sentiment.get('posts_analyzed', 0)} posts analyzed)"
+        )
 
     return {
         "symbol": symbol,
@@ -508,12 +576,7 @@ def combined_analysis(symbol: str, exchange: str = "NASDAQ", timeframe: str = "1
         "confluence": {
             "signals_agree": signals_agree,
             "confidence": confidence,
-            "recommendation": (
-                f"Technical {tech_signal} "
-                f"{'confirmed by' if signals_agree else 'conflicts with'} "
-                f"{sentiment.get('sentiment_label', 'Neutral')} Reddit sentiment "
-                f"({sentiment.get('posts_analyzed', 0)} posts analyzed)"
-            ),
+            "recommendation": recommendation,
         },
     }
 
@@ -603,13 +666,45 @@ def walk_forward_backtest_strategy(
 
 # ── Yahoo Finance tools ────────────────────────────────────────────────────────
 
+# Curated set of pure-GPW tickers that should route to Stooq.
+# Kept narrow on purpose: GPW also lists dual-listed US CFDs (AAPL, MSFT, …)
+# which we do NOT want to send to Stooq — Yahoo serves them correctly.
+_STOOQ_PRIMARY_GPW_TICKERS: set[str] = {
+    # WIG20 / mWIG40 — Polish blue chips
+    "KGH", "CDR", "JSW", "PKN", "PZU", "PEO", "PKO", "DNP", "ALR", "LPP",
+    "ALE", "OPL", "SPL", "MBK", "ASE", "TPE", "PGE", "CCC", "KTY", "KRU",
+    "CPS", "EUR", "BDX", "ATT",
+    # Smaller caps in user's portfolio
+    "CRI", "CRQ",
+    # BETA ETFs (note: Stooq currently has no quote for these — request still
+    # returns a clean error, which is honest behaviour vs. silently going to Yahoo)
+    "ETFBW20TR", "ETFBCASH", "ETFBS80TR",
+}
+
+
+def _should_route_to_stooq(symbol: str) -> bool:
+    """True if *symbol* is unambiguously a Warsaw-listed Polish stock."""
+    s = symbol.strip().upper()
+    if s.endswith(".WA"):
+        return True
+    return s in _STOOQ_PRIMARY_GPW_TICKERS
+
+
 @mcp.tool()
 def yahoo_price(symbol: str) -> dict:
-    """Real-time price quote from Yahoo Finance for any stock, crypto, ETF or index.
+    """Real-time price quote — Yahoo Finance globally, Stooq for Polish (GPW) tickers.
+
+    Yahoo Finance does not reliably cover Warsaw Stock Exchange tickers
+    (``KGHM.WA`` returns null). For symbols ending in ``.WA`` or matching a
+    curated set of pure-GPW codes (KGH, CDR, JSW, PKN, ETFBW20TR, …), the
+    request is routed to Stooq instead. All other symbols — including
+    GPW-listed CFDs of US stocks (AAPL, MSFT) — use Yahoo Finance.
 
     Args:
-        symbol: Yahoo Finance symbol — e.g. AAPL, BTC-USD, SPY, ^GSPC, EURUSD=X, THYAO.IS
+        symbol: e.g. AAPL, BTC-USD, SPY, ^GSPC, EURUSD=X, THYAO.IS, KGHM.WA, KGH
     """
+    if _should_route_to_stooq(symbol):
+        return stooq_get_price(symbol)
     return get_price(symbol)
 
 

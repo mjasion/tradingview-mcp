@@ -158,3 +158,66 @@ class TestExistingExchangesUnchanged:
     @pytest.mark.parametrize("exchange", ["kucoin", "binance", "bybit", "mexc"])
     def test_crypto_not_in_stock_exchanges(self, exchange):
         assert exchange not in STOCK_EXCHANGES
+
+
+# ── Global stock market expansion: GPW, Xetra, LSE, TSX, Euronext, Nordics, ──
+#    Japan, Korea  (verified live against TradingView screener probe) ────────
+
+class TestGlobalExchangeMappings:
+    """Each new alias must:
+    1. survive sanitize_exchange (i.e. be in EXCHANGE_SCREENER),
+    2. route to the correct screener market,
+    3. produce the TradingView prefix used in EXCH:TICKER symbols,
+    4. count as a stock exchange (not crypto).
+    """
+
+    @pytest.mark.parametrize("alias,expected_market,expected_prefix", [
+        ("gpw",      "poland",      "GPW"),
+        ("wse",      "poland",      "GPW"),
+        ("xetra",    "germany",     "XETR"),
+        ("xetr",     "germany",     "XETR"),
+        ("fwb",      "germany",     "FWB"),
+        ("fra",      "germany",     "FWB"),
+        ("lse",      "uk",          "LSE"),
+        ("lon",      "uk",          "LSE"),
+        ("uk",       "uk",          "LSE"),
+        ("tsx",      "canada",      "TSX"),
+        ("tsxv",     "canada",      "TSXV"),
+        ("cse",      "canada",      "CSE"),
+        ("neo",      "canada",      "NEO"),
+        ("euronext", "france",      "EURONEXT"),
+        ("epa",      "france",      "EURONEXT"),
+        ("ams",      "netherlands", "EURONEXT"),
+        ("ebr",      "belgium",     "EURONEXT"),
+        ("els",      "portugal",    "EURONEXT"),
+        ("mil",      "italy",       "MIL"),
+        ("borsa",    "italy",       "MIL"),
+        ("bme",      "spain",       "BME"),
+        ("six",      "switzerland", "SIX"),
+        ("vie",      "austria",     "VIE"),
+        ("wbag",     "austria",     "VIE"),
+        ("osl",      "norway",      "OSL"),
+        ("omxsto",   "sweden",      "OMXSTO"),
+        ("omxcop",   "denmark",     "OMXCOP"),
+        ("omxhex",   "finland",     "OMXHEX"),
+        ("tse",      "japan",       "TSE"),
+        ("tyo",      "japan",       "TSE"),
+        ("krx",      "korea",       "KRX"),
+        ("kospi",    "korea",       "KRX"),
+        ("kosdaq",   "korea",       "KOSDAQ"),
+    ])
+    def test_alias_maps_correctly(self, alias, expected_market, expected_prefix):
+        assert sanitize_exchange(alias, "kucoin") == alias
+        assert EXCHANGE_SCREENER[alias] == expected_market
+        assert get_tv_exchange_prefix(alias) == expected_prefix
+        assert is_stock_exchange(alias) is True
+        assert alias in STOCK_EXCHANGES
+
+    @pytest.mark.parametrize("alias", [
+        "GPW", "Xetra", "LSE", "TSX", "EURONEXT", "OSL",
+        "TSE", "KRX", "MIL", "SIX",
+    ])
+    def test_alias_case_insensitive(self, alias):
+        """sanitize_exchange must normalise case so GPW, gpw, Gpw all work."""
+        assert sanitize_exchange(alias, "kucoin") == alias.lower()
+        assert is_stock_exchange(alias) is True

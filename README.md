@@ -304,13 +304,27 @@ Example prompt: "Compare all strategies on BTC-USD for 2 years"
 
 ### 🌍 Multi-Exchange Support
 
-| Exchange | Tools |
-|----------|-------|
-| **Binance** | Crypto screener, all pairs |
-| **KuCoin / Bybit+** | Crypto screener |
-| **NASDAQ / NYSE** | US stocks (AAPL, TSLA, NVDA...) |
-| **EGX (Egypt)** | `egx_market_overview`, `egx_stock_screener`, `egx_trade_plan`, `egx_fibonacci_retracement` |
-| **Turkish (BIST)** | Via TradingView screener |
+**Crypto:** Binance, KuCoin, Bybit, MEXC — full screener + all pairs.
+
+**US:** NASDAQ, NYSE, AMEX / NYSEARCA / PCX (ETFs like GDX, SPY, QQQ).
+
+**Europe:**
+- 🇵🇱 **GPW / WSE** (Poland) — KGH, CDR, JSW, PKN, PZU, BETA ETFs… Full TA via TradingView; live prices via **Stooq** fallback (Yahoo doesn't cover `.WA`); Polish news from RSS (Bankier, Money.pl, Comparic) **+ PAP Biznes via built-in HTML scraper** (no public RSS), with company-name aliases (KGH → KGHM / Polska Miedź).
+- 🇩🇪 **Xetra / FWB** (Germany) — SAP, Siemens, Allianz…
+- 🇬🇧 **LSE** (UK) — HSBA, BP, AZN…
+- 🇫🇷 🇳🇱 🇧🇪 🇵🇹 **Euronext** — Paris (EPA), Amsterdam (AMS), Brussels (EBR), Lisbon (ELS).
+- 🇮🇹 **Borsa Italiana (MIL)**, 🇪🇸 **BME** (Madrid), 🇨🇭 **SIX** (Zurich), 🇦🇹 **VIE / WBAG**.
+- 🇳🇴 **OSL** (Oslo), 🇸🇪 **OMXSTO** (Stockholm), 🇩🇰 **OMXCOP** (Copenhagen), 🇫🇮 **OMXHEX** (Helsinki).
+
+**Asia / Americas:**
+- 🇨🇦 **TSX / TSXV / CSE / NEO** (Canada) — SHOP, RY…
+- 🇯🇵 **TSE / TYO** (Japan) — 7203 (Toyota), 6758 (Sony)…
+- 🇰🇷 **KRX / KOSDAQ** (Korea) — 005930 (Samsung)…
+- 🇹🇼 TWSE / TPEX, 🇭🇰 HKEX, 🇨🇳 SSE / SZSE, 🇦🇺 ASX, 🇲🇾 BURSA.
+
+**Middle East / Africa:** 🇪🇬 **EGX** (dedicated tools: `egx_market_overview`, `egx_stock_screener`, `egx_trade_plan`, `egx_fibonacci_retracement`), 🇹🇷 **BIST** (Turkey).
+
+> All TA/screener tools (`coin_analysis`, `multi_timeframe_analysis`, `combined_analysis`, `top_gainers`, `bollinger_scan`, …) work for any exchange above — pass the alias as the `exchange` parameter (e.g. `coin_analysis(symbol="KGH", exchange="gpw")`). For GPW, Reddit sentiment is automatically skipped (low Polish coverage) and replaced by Polish RSS feeds.
 
 ---
 

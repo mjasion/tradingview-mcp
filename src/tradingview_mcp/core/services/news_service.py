@@ -37,12 +37,33 @@ RSS_FEEDS: dict[str, list[dict]] = {
         {"url": "https://www.coindesk.com/arc/outboundfeeds/rss/", "name": "CoinDesk"},
         {"url": "https://cointelegraph.com/rss", "name": "CoinTelegraph"},
     ],
+    # Polish stock market. RSS feeds verified live (May 2026); PAP Biznes is
+    # added as an HTML scraper (see pap_scraper.py) because biznes.pap.pl
+    # exposes no public RSS. Verified MISS / no public RSS: parkiet.com,
+    # biznesradar.pl, stooq.pl/n, forsal, wnp, strefainwestorow, rp.pl/biznes.
+    "pl_stocks": [
+        {"url": "https://www.bankier.pl/rss/wiadomosci.xml", "name": "Bankier.pl"},
+        {"url": "https://www.money.pl/rss/gielda.xml",       "name": "Money.pl Giełda"},
+        {"url": "https://www.money.pl/rss/news.xml",         "name": "Money.pl"},
+        {"url": "https://comparic.pl/feed/",                 "name": "Comparic.pl"},
+        # PAP Biznes — HTML scraper, attached after the RSS loop in fetch_news()
+    ],
 }
 
 _TIMEOUT = 8
 
 
 # ─── Public API ───────────────────────────────────────────────────────────────
+
+def _symbol_search_terms(symbol: str, category: str) -> list[str]:
+    """Return list of substrings to look for. For Polish category, expand the
+    ticker to common company-name aliases (KGH → ['KGHM','KGH','Polska Miedź']).
+    """
+    if category == "pl_stocks":
+        from tradingview_mcp.core.data.gpw_company_names import search_aliases
+        return [a.upper() for a in search_aliases(symbol)]
+    return [symbol.upper()]
+
 
 def fetch_news(
     symbol: Optional[str] = None,
@@ -54,8 +75,10 @@ def fetch_news(
 
     Args:
         symbol:   Optional ticker filter. If provided, only returns headlines
-                  that mention the symbol (case-insensitive). e.g. "AAPL", "BTC"
-        category: Feed group — "crypto" | "stocks" | "all"
+                  that mention the symbol (case-insensitive). For category
+                  ``pl_stocks`` the ticker is also expanded to company-name
+                  aliases (e.g. ``KGH`` matches "KGHM" and "Polska Miedź").
+        category: Feed group — "crypto" | "stocks" | "pl_stocks" | "all"
         limit:    Maximum number of items to return
 
     Returns:
@@ -68,6 +91,7 @@ def fetch_news(
         }]
 
     feeds = RSS_FEEDS.get(category, RSS_FEEDS["stocks"])
+    search_terms = _symbol_search_terms(symbol, category) if symbol else []
     results: list[dict] = []
 
     for feed_info in feeds:
@@ -84,10 +108,9 @@ def fetch_news(
                 title = entry.get("title", "")
                 summary = entry.get("summary", "") or entry.get("description", "")
 
-                # Symbol filter
-                if symbol:
+                if search_terms:
                     combined = f"{title} {summary}".upper()
-                    if symbol.upper() not in combined:
+                    if not any(term in combined for term in search_terms):
                         continue
 
                 results.append({
@@ -100,6 +123,21 @@ def fetch_news(
 
         except Exception:
             continue
+
+    # PAP Biznes has no RSS — synthesise feed from HTML scraper for pl_stocks.
+    if category == "pl_stocks" and len(results) < limit:
+        try:
+            from tradingview_mcp.core.services.pap_scraper import fetch_pap_items
+            for item in fetch_pap_items(limit=60):
+                if len(results) >= limit:
+                    break
+                if search_terms:
+                    haystack = f"{item['title']} {item['url']}".upper()
+                    if not any(term in haystack for term in search_terms):
+                        continue
+                results.append(item)
+        except Exception:
+            pass
 
     return results[:limit]
 

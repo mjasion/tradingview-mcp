@@ -22,6 +22,26 @@ STOCK_EXCHANGES: Set[str] = {
     "asx",
     "sse", "szse", "chn",
     "twse", "tpex",
+    # Europe
+    "gpw", "wse",                                            # Warsaw (Poland)
+    "xetra", "xetr", "fwb", "fra",                           # Germany
+    "lse", "lon", "uk",                                      # London (UK)
+    "euronext", "epa", "par", "ams", "ena",                  # Euronext Paris/Amsterdam
+    "ebr", "bru", "els", "lis",                              # Euronext Brussels/Lisbon
+    "mil", "borsa", "bit",                                   # Borsa Italiana
+    "bme", "mce",                                            # Spain
+    "six", "swx", "ebs",                                     # Switzerland
+    "vie", "wbag",                                           # Vienna (Austria)
+    # Nordics
+    "osl", "ose",                                            # Oslo (Norway)
+    "omxsto", "sto", "ome",                                  # Stockholm (Sweden)
+    "omxcop", "cph", "cse_dk",                               # Copenhagen (Denmark)
+    "omxhex", "hel",                                         # Helsinki (Finland)
+    # Americas
+    "tsx", "tsxv", "cse", "neo",                             # Canada
+    # Asia
+    "tse", "tyo", "jpx",                                     # Tokyo (Japan)
+    "krx", "kospi", "kosdaq",                                # Korea
 }
 
 EXCHANGE_SCREENER = {
@@ -63,6 +83,29 @@ EXCHANGE_SCREENER = {
     # Taiwan Stock Market Support
     "twse": "taiwan",       # Taiwan Stock Exchange (臺灣證券交易所)
     "tpex": "taiwan",       # Taipei Exchange (櫃買中心, OTC market)
+    # Europe
+    "gpw": "poland", "wse": "poland",                                       # Warsaw Stock Exchange
+    "xetra": "germany", "xetr": "germany", "fwb": "germany", "fra": "germany",
+    "lse": "uk", "lon": "uk", "uk": "uk",                                   # London Stock Exchange
+    "euronext": "france", "epa": "france", "par": "france",                 # Euronext Paris (default)
+    "ams": "netherlands", "ena": "netherlands",                             # Euronext Amsterdam
+    "ebr": "belgium", "bru": "belgium",                                     # Euronext Brussels
+    "els": "portugal", "lis": "portugal",                                   # Euronext Lisbon
+    "mil": "italy", "borsa": "italy", "bit": "italy",                       # Borsa Italiana (Milan)
+    "bme": "spain", "mce": "spain",                                         # Bolsa de Madrid
+    "six": "switzerland", "swx": "switzerland", "ebs": "switzerland",       # SIX Swiss Exchange
+    "vie": "austria", "wbag": "austria",                                    # Vienna Stock Exchange
+    # Nordics
+    "osl": "norway", "ose": "norway",                                       # Oslo Bors
+    "omxsto": "sweden", "sto": "sweden", "ome": "sweden",                   # Nasdaq Stockholm
+    "omxcop": "denmark", "cph": "denmark", "cse_dk": "denmark",             # Nasdaq Copenhagen
+    "omxhex": "finland", "hel": "finland",                                  # Nasdaq Helsinki
+    # Canada
+    "tsx": "canada", "tsxv": "canada", "cse": "canada", "neo": "canada",
+    # Japan
+    "tse": "japan", "tyo": "japan", "jpx": "japan",                         # Tokyo Stock Exchange
+    # Korea
+    "krx": "korea", "kospi": "korea", "kosdaq": "korea",                    # KRX (KOSPI + KOSDAQ)
 }
 
 # Map validated exchange identifiers to their canonical TradingView symbol prefix.
@@ -90,6 +133,30 @@ _EXCHANGE_TV_PREFIX: dict = {
     "chn": "SSE",
     "twse": "TWSE",
     "tpex": "TPEX",
+    # Europe — confirmed via TradingView screener probe
+    "gpw": "GPW", "wse": "GPW",
+    "xetra": "XETR", "xetr": "XETR", "fwb": "FWB", "fra": "FWB",
+    "lse": "LSE", "lon": "LSE", "uk": "LSE",
+    # Euronext is one prefix for FR/NL/BE/PT in TradingView even though screener splits them
+    "euronext": "EURONEXT", "epa": "EURONEXT", "par": "EURONEXT",
+    "ams": "EURONEXT", "ena": "EURONEXT",
+    "ebr": "EURONEXT", "bru": "EURONEXT",
+    "els": "EURONEXT", "lis": "EURONEXT",
+    "mil": "MIL", "borsa": "MIL", "bit": "MIL",
+    "bme": "BME", "mce": "BME",
+    "six": "SIX", "swx": "SIX", "ebs": "SIX",
+    "vie": "VIE", "wbag": "VIE",
+    # Nordics
+    "osl": "OSL", "ose": "OSL",
+    "omxsto": "OMXSTO", "sto": "OMXSTO", "ome": "OMXSTO",
+    "omxcop": "OMXCOP", "cph": "OMXCOP", "cse_dk": "OMXCOP",
+    "omxhex": "OMXHEX", "hel": "OMXHEX",
+    # Canada
+    "tsx": "TSX", "tsxv": "TSXV", "cse": "CSE", "neo": "NEO",
+    # Japan
+    "tse": "TSE", "tyo": "TSE", "jpx": "TSE",
+    # Korea — KRX prefix covers KOSPI; KOSDAQ tickers use separate prefix
+    "krx": "KRX", "kospi": "KRX", "kosdaq": "KOSDAQ",
 }
 
 
