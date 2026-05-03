@@ -55,11 +55,11 @@ This is what tells the agent how to act as a trader.
 mkdir -p ~/.agents/skills/tradingview-mcp ~/.openclaw/tools
 
 # Download the TradingView skill (instructions)
-curl -fsSL https://raw.githubusercontent.com/atilaahmettaner/tradingview-mcp/main/openclaw/SKILL.md \
+curl -fsSL https://raw.githubusercontent.com/mjasion/tradingview-mcp/main/openclaw/SKILL.md \
   -o ~/.agents/skills/tradingview-mcp/SKILL.md
 
 # Download the trading execution wrapper (tools)
-curl -fsSL https://raw.githubusercontent.com/atilaahmettaner/tradingview-mcp/main/openclaw/trading.py \
+curl -fsSL https://raw.githubusercontent.com/mjasion/tradingview-mcp/main/openclaw/trading.py \
   -o ~/.openclaw/tools/trading.py
 chmod +x ~/.openclaw/tools/trading.py
 ```
@@ -221,4 +221,4 @@ The server uses a direct + proxy fallback. Without a proxy, some symbols may fai
 
 ---
 
-For more, see the [tradingview-mcp README](https://github.com/atilaahmettaner/tradingview-mcp).
+For more, see the [tradingview-mcp README](https://github.com/mjasion/tradingview-mcp).

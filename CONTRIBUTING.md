@@ -5,12 +5,12 @@ Thank you for your interest in contributing to the TradingView MCP Server! This 
 ## 🌟 Ways to Contribute
 
 ### 🐛 Report Bugs
-- Found a bug? [Open an issue](https://github.com/atilaahmettaner/tradingview-mcp/issues/new)
+- Found a bug? [Open an issue](https://github.com/mjasion/tradingview-mcp/issues/new)
 - Include reproduction steps, expected vs actual behavior
 - Provide system info (OS, Python version, UV version)
 
 ### 💡 Suggest Features
-- Have an idea? [Create a feature request](https://github.com/atilaahmettaner/tradingview-mcp/issues/new)
+- Have an idea? [Create a feature request](https://github.com/mjasion/tradingview-mcp/issues/new)
 - Explain the use case and expected benefit
 - Consider implementation complexity
 

@@ -1,7 +1,7 @@
 services:
   tradingview-mcp:
     build: .
-    image: atilaahmet/tradingview-mcp:latest
+    image: mjasion/tradingview-mcp:latest
     container_name: tradingview-mcp
     ports:
       - "8080:8000"

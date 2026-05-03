@@ -1,7 +1,7 @@
 ---
 name: tradingview-mcp
 description: AI Trading Intelligence — live prices, 30+ technical indicators, backtesting (6 strategies), walk-forward overfitting detection, trade logs, equity curves, Reddit sentiment, news, and multi-market screener. Supports stocks, crypto, ETFs, indices, Turkish (BIST), and Egyptian (EGX) markets.
-metadata: { "openclaw": { "emoji": "📈", "always": true, "homepage": "https://github.com/atilaahmettaner/tradingview-mcp" } }
+metadata: { "openclaw": { "emoji": "📈", "always": true, "homepage": "https://github.com/mjasion/tradingview-mcp" } }
 ---
 
 # TradingView MCP — AI Trading Intelligence

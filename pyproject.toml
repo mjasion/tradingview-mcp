@@ -7,7 +7,10 @@ requires-python = ">=3.10"
 authors = [
   { name = "Atila Ahmettaner" }
 ]
-urls = { Repository = "https://github.com/atilaahmettaner/tradingview-mcp" }
+maintainers = [
+  { name = "Marcin Jasion" }
+]
+urls = { Repository = "https://github.com/mjasion/tradingview-mcp" }
 keywords = ["mcp", "tradingview", "crypto", "technical analysis", "screener", "backtesting", "walk-forward", "sentiment", "yahoo-finance", "trading", "agents", "algorithmic-trading", "equity-curve"]
 classifiers = [
     "Programming Language :: Python :: 3",

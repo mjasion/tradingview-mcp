@@ -67,7 +67,7 @@ Open the config file and add this configuration:
         "tool",
         "run",
         "--from",
-        "git+https://github.com/atilaahmettaner/tradingview-mcp.git",
+        "git+https://github.com/mjasion/tradingview-mcp.git",
         "tradingview-mcp"
       ]
     }
@@ -89,7 +89,7 @@ Open the config file and add this configuration:
         "tool",
         "run",
         "--from",
-        "git+https://github.com/atilaahmettaner/tradingview-mcp.git",
+        "git+https://github.com/mjasion/tradingview-mcp.git",
         "tradingview-mcp"
       ]
     }
@@ -129,7 +129,7 @@ You should see tools like:
 
 2. **Clone the Repository:**
    ```powershell
-   git clone https://github.com/atilaahmettaner/tradingview-mcp.git
+   git clone https://github.com/mjasion/tradingview-mcp.git
    cd tradingview-mcp
    ```
 
@@ -170,7 +170,7 @@ If you want to modify the code or run it locally:
 
 ```bash
 # Clone the repository
-git clone https://github.com/atilaahmettaner/tradingview-mcp.git
+git clone https://github.com/mjasion/tradingview-mcp.git
 cd tradingview-mcp
 
 # Install dependencies
@@ -217,7 +217,7 @@ If you prefer traditional Python environments:
 **Windows:**
 ```powershell
 # Clone repository
-git clone https://github.com/atilaahmettaner/tradingview-mcp.git
+git clone https://github.com/mjasion/tradingview-mcp.git
 cd tradingview-mcp
 
 # Create virtual environment
@@ -234,7 +234,7 @@ python src/tradingview_mcp/server.py
 **macOS/Linux:**
 ```bash
 # Clone repository
-git clone https://github.com/atilaahmettaner/tradingview-mcp.git
+git clone https://github.com/mjasion/tradingview-mcp.git
 cd tradingview-mcp
 
 # Create virtual environment
@@ -386,7 +386,7 @@ chmod -R 755 ~/path/to/tradingview-mcp
         "tool",
         "run", 
         "--from",
-        "git+https://github.com/atilaahmettaner/tradingview-mcp.git",
+        "git+https://github.com/mjasion/tradingview-mcp.git",
         "tradingview-mcp"
       ],
       "env": {
@@ -413,7 +413,7 @@ chmod -R 755 ~/path/to/tradingview-mcp
 ## Getting Help
 
 1. **Check the logs:** Claude Desktop → Settings → Developer → View Logs
-2. **GitHub Issues:** [Report bugs here](https://github.com/atilaahmettaner/tradingview-mcp/issues)
+2. **GitHub Issues:** [Report bugs here](https://github.com/mjasion/tradingview-mcp/issues)
 3. **Documentation:** [Main README](README.md)
 4. **Test locally:** Use `uv run python src/tradingview_mcp/server.py` to debug
 

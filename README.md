@@ -1,7 +1,5 @@
 # 📈 AI Trading Intelligence Framework — MCP Server
 
-<a href="https://trendshift.io/repositories/25110" target="_blank"><img src="https://trendshift.io/api/badge/repositories/25110" alt="atilaahmettaner%2Ftradingview-mcp | Trendshift" style="width: 250px; height: 55px;" width="250" height="55"/></a>
-
 **The most complete AI-powered trading toolkit for Claude and MCP clients.**
 Backtesting + Live Sentiment + Yahoo Finance + 30+ Technical Analysis Tools — all in one MCP server.
 
@@ -9,27 +7,8 @@ Backtesting + Live Sentiment + Yahoo Finance + 30+ Technical Analysis Tools — 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![MCP Ready](https://img.shields.io/badge/MCP-Ready-brightgreen)](https://modelcontextprotocol.com/)
 [![OpenClaw Ready](https://img.shields.io/badge/OpenClaw-Ready-blueviolet)](https://openclaw.ai)
-[![Version](https://img.shields.io/badge/version-v0.7.0-blue)](https://github.com/atilaahmettaner/tradingview-mcp/releases)
-[![PyPI](https://img.shields.io/badge/PyPI-tradingview--mcp--server-orange)](https://pypi.org/project/tradingview-mcp-server/)
-[![GitHub Sponsors](https://img.shields.io/badge/Sponsor-❤️-pink?logo=github-sponsors)](https://github.com/sponsors/atilaahmettaner)
+[![Version](https://img.shields.io/badge/version-v0.7.1-blue)](https://github.com/mjasion/tradingview-mcp/releases)
 
-> **⭐ If this tool improves your workflow, please star the repo and consider [sponsoring](https://github.com/sponsors/atilaahmettaner) — it keeps the project alive and growing!**
-
-<a href="https://github.com/sponsors/atilaahmettaner">
-  <img src="https://img.shields.io/badge/☕_Coffee_($5)-Sponsor-orange?style=for-the-badge&logo=github-sponsors" alt="Sponsor $5"/>
-</a>
-<a href="https://github.com/sponsors/atilaahmettaner">
-  <img src="https://img.shields.io/badge/🚀_Supporter_($15)-Sponsor-blueviolet?style=for-the-badge&logo=github-sponsors" alt="Sponsor $15"/>
-</a>
-<a href="https://github.com/sponsors/atilaahmettaner">
-  <img src="https://img.shields.io/badge/💎_Pro_($30)-Sponsor-gold?style=for-the-badge&logo=github-sponsors" alt="Sponsor $30"/>
-</a>
-
-> **🚀 Don't want to fight `uv` / `pandas` / Python on Windows?**  
-> [**pro.cryptosieve.com**](https://pro.cryptosieve.com) — same 30+ tools,  
-> one connector URL into Claude.ai, ChatGPT, Copilot, Cursor. **$9/month** with 7-day free trial.  
-> Self-hosting is free and always will be; the hosted version is just for  
-> folks who'd rather skip the ops dance.
 ---
 
 ## 🎥 Framework Demo
@@ -59,9 +38,20 @@ https://github-production-user-asset-6210df.s3.amazonaws.com/67838093/478689497-
 
 ## 🚀 Quick Start (5 Minutes)
 
-### Install via pip
+### Run with Docker (recommended)
 ```bash
-pip install tradingview-mcp-server
+docker run -d --name tradingview-mcp -p 8080:8000 mjasion/tradingview-mcp:latest
+```
+Or use the bundled `docker-compose.yml` (with autoheal sidecar):
+```bash
+docker compose up -d
+```
+
+### Run from source
+```bash
+git clone https://github.com/mjasion/tradingview-mcp
+cd tradingview-mcp
+uv run tradingview-mcp
 ```
 
 ### Claude Desktop Config (`claude_desktop_config.json`)
@@ -73,20 +63,13 @@ pip install tradingview-mcp-server
   "mcpServers": {
     "tradingview": {
       "command": "/Users/YOUR_USERNAME/.local/bin/uvx",
-      "args": ["--from", "tradingview-mcp-server", "tradingview-mcp"]
+      "args": ["--from", "git+https://github.com/mjasion/tradingview-mcp", "tradingview-mcp"]
     }
   }
 }
 ```
 
 On Linux, replace `/Users/YOUR_USERNAME` with `/home/YOUR_USERNAME`. On Windows, use `%USERPROFILE%\.local\bin\uvx.exe`.
-
-### Or run from source
-```bash
-git clone https://github.com/atilaahmettaner/tradingview-mcp
-cd tradingview-mcp
-uv run tradingview-mcp
-```
 
 ---
 
@@ -129,7 +112,7 @@ uv tool install --python 3.13 tradingview-mcp-server
 
 After the install finishes, start Claude Desktop with the normal config and the server will come up instantly (cache is already warm).
 
-> _Credit: [@wyh4444](https://github.com/wyh4444) for the original report in [#24](https://github.com/atilaahmettaner/tradingview-mcp/issues/24)._
+> _Credit: [@wyh4444](https://github.com/wyh4444) for the original report in [#24](https://github.com/mjasion/tradingview-mcp/issues/24)._
 
 ---
 
@@ -172,9 +155,9 @@ openclaw configure --section model
 
 # 5. Install the skill + tool wrapper
 mkdir -p ~/.agents/skills/tradingview-mcp ~/.openclaw/tools
-curl -fsSL https://raw.githubusercontent.com/atilaahmettaner/tradingview-mcp/main/openclaw/SKILL.md \
+curl -fsSL https://raw.githubusercontent.com/mjasion/tradingview-mcp/main/openclaw/SKILL.md \
   -o ~/.agents/skills/tradingview-mcp/SKILL.md
-curl -fsSL https://raw.githubusercontent.com/atilaahmettaner/tradingview-mcp/main/openclaw/trading.py \
+curl -fsSL https://raw.githubusercontent.com/mjasion/tradingview-mcp/main/openclaw/trading.py \
   -o ~/.openclaw/tools/trading.py && chmod +x ~/.openclaw/tools/trading.py
 
 # 6. Start the gateway
@@ -349,21 +332,11 @@ AI: [combined_analysis] → BUY (Technical STRONG BUY + Bullish Reddit + Positiv
 
 ---
 
-## 💖 Support the Project
+## 🙏 Credits
 
-This framework is **free and open source**, built in spare time. If it saves you hours of research or helps you make better decisions, please consider sponsoring:
+This project is a fork of [tradingview-mcp](https://github.com/atilaahmettaner/tradingview-mcp) by [**Atila Ahmettaner**](https://github.com/atilaahmettaner) — the original author of the framework. This fork adds global stock market coverage (GPW, Xetra, LSE, TSX, Euronext, Nordics, Japan, Korea), Polish data providers (Stooq, PAP Biznes scraper, Polish RSS), and is maintained by [Marcin Jasion](https://github.com/mjasion).
 
-| Tier | Monthly | What You Get |
-|------|---------|--------------|
-| ☕ Coffee | $5 | Heartfelt gratitude + name in README |
-| 🚀 Supporter | $15 | Above + priority bug fixes |
-| 💎 Pro | $30 | Above + priority feature requests |
-
-<a href="https://github.com/sponsors/atilaahmettaner">
-  <img src="https://img.shields.io/badge/Become_a_Sponsor-pink?style=for-the-badge&logo=github-sponsors" alt="Sponsor"/>
-</a>
-
-Every sponsor directly funds new features like Walk-Forward Backtesting, Twitter/X sentiment, and managed cloud hosting.
+If the original framework was useful to you, consider [sponsoring Atila](https://github.com/sponsors/atilaahmettaner).
 
 ---
 
