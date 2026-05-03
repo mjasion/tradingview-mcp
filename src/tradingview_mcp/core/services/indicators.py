@@ -205,10 +205,19 @@ def extract_extended_indicators(indicators: Dict) -> Dict:
     if atr_value is not None and close and close > 0:
         atr_pct = (atr_value / close) * 100
 
+    if atr_pct is None:
+        volatility = "Unknown"
+    elif atr_pct > 3:
+        volatility = "High"
+    elif atr_pct > 1.5:
+        volatility = "Medium"
+    else:
+        volatility = "Low"
+
     atr = {
         "value": _safe_round(atr_value, 4),
         "percent_of_price": _safe_round(atr_pct, 2),
-        "volatility": "High" if atr_pct and atr_pct > 3 else "Medium" if atr_pct and atr_pct > 1.5 else "Low",
+        "volatility": volatility,
     }
 
     # --- MACD ---

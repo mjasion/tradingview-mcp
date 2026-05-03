@@ -52,7 +52,7 @@ def _normalize(symbol: str) -> str:
 
 
 def _fetch_csv(symbol: str) -> list[dict[str, str]]:
-    url = f"{_BASE}?s={_normalize(symbol)}&f=sd2t2ohlcvn&h&e=csv"
+    url = f"{_BASE}?s={symbol}&f=sd2t2ohlcvn&h&e=csv"
     req = urllib.request.Request(url, headers={"User-Agent": _UA})
     try:
         opener = build_opener_with_proxy(_UA)
@@ -62,6 +62,27 @@ def _fetch_csv(symbol: str) -> list[dict[str, str]]:
         with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:
             text = resp.read().decode("utf-8", errors="replace")
     return list(csv.DictReader(io.StringIO(text)))
+
+
+def _candidate_symbols(symbol: str) -> list[str]:
+    """Stooq tries multiple symbol forms for the same instrument:
+
+    * Plain GPW stocks: bare 3-letter code (``kgh``, ``cdr``)
+    * ETFs and some non-equity instruments: require ``.pl`` market suffix
+      (``etfbw20tr.pl``, ``etfbs80tr.pl``)
+    * US/UK ETFs: lowercase ticker (already handled by the bare form)
+
+    We attempt the bare form first (cheap on stocks), then ``.pl`` suffix
+    for ETF-like tickers. The resolver stops at the first form that yields
+    a non-N/D Close field.
+    """
+    normalized = _normalize(symbol)
+    candidates = [normalized]
+    if not normalized.endswith(".pl") and (
+        normalized.startswith("etf") or normalized.startswith("beta")
+    ):
+        candidates.append(f"{normalized}.pl")
+    return candidates
 
 
 def _to_float(v: Optional[str]) -> Optional[float]:
@@ -84,10 +105,19 @@ def get_price(symbol: str) -> dict:
     """
     sym_upper = symbol.strip().upper()
     try:
-        rows = _fetch_csv(symbol)
-        if not rows:
+        row: dict[str, str] | None = None
+        attempted: list[str] = []
+        for candidate in _candidate_symbols(symbol):
+            attempted.append(candidate)
+            rows = _fetch_csv(candidate)
+            if rows and _to_float(rows[0].get("Close")) is not None:
+                row = rows[0]
+                break
+            row = rows[0] if rows else None
+
+        if row is None:
             return {"symbol": sym_upper, "error": "Stooq returned no rows", "source": "Stooq"}
-        row = rows[0]
+
         close = _to_float(row.get("Close"))
         open_ = _to_float(row.get("Open"))
         high = _to_float(row.get("High"))
@@ -97,7 +127,7 @@ def get_price(symbol: str) -> dict:
         if close is None:
             return {
                 "symbol": sym_upper,
-                "error": f"Stooq has no quote for '{_normalize(symbol)}' (row: {row})",
+                "error": f"Stooq has no quote for {attempted} (last row: {row})",
                 "source": "Stooq",
             }
 

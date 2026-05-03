@@ -110,11 +110,22 @@ def analyze_sentiment(
 
     all_posts: list[dict] = []
     scores: list[float] = []
+    # Reddit's per-subreddit search occasionally returns the same post in
+    # multiple subreddits (cross-posts) or twice within one feed. Dedup by
+    # permalink so a single post does not double-count toward bullish/bearish
+    # tallies or appear twice in top_posts.
+    seen_permalinks: set[str] = set()
 
     for sub in subs:
         raw = _fetch_reddit_posts(sub, symbol, per_sub)
         for p in raw:
             d = p.get("data", {})
+            permalink = d.get("permalink", "")
+            dedup_key = permalink or d.get("id", "")
+            if dedup_key and dedup_key in seen_permalinks:
+                continue
+            if dedup_key:
+                seen_permalinks.add(dedup_key)
             title = d.get("title", "")
             body = d.get("selftext", "")
             text = f"{title} {body}"
@@ -125,7 +136,7 @@ def analyze_sentiment(
                 "upvotes": d.get("score", 0),
                 "comments": d.get("num_comments", 0),
                 "sentiment": "bullish" if score > 0 else "bearish" if score < 0 else "neutral",
-                "url": f"https://reddit.com{d.get('permalink', '')}",
+                "url": f"https://reddit.com{permalink}",
                 "subreddit": f"r/{sub}",
             })
 

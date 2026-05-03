@@ -46,9 +46,12 @@ from tradingview_mcp.core.services.news_service import fetch_news_summary
 from tradingview_mcp.core.services.yahoo_finance_service import (
     get_price,
     get_market_snapshot,
+    get_earnings,
+    get_dividends,
 )
 from tradingview_mcp.core.services.stooq_service import get_price as stooq_get_price
 from tradingview_mcp.core.services.bitcoin_market_service import get_bitcoin_market_pulse
+from tradingview_mcp.core.services.commodity_service import get_commodity_snapshot
 from tradingview_mcp.core.services.backtest_service import (
     run_backtest,
     compare_strategies as _compare_strategies,
@@ -676,9 +679,9 @@ _STOOQ_PRIMARY_GPW_TICKERS: set[str] = {
     "CPS", "EUR", "BDX", "ATT",
     # Smaller caps in user's portfolio
     "CRI", "CRQ",
-    # BETA ETFs (note: Stooq currently has no quote for these — request still
-    # returns a clean error, which is honest behaviour vs. silently going to Yahoo)
-    "ETFBW20TR", "ETFBCASH", "ETFBS80TR",
+    # BETA ETFs — Stooq covers these via the ``.pl`` market-suffix form,
+    # resolved automatically by stooq_service._candidate_symbols.
+    "ETFBW20TR", "ETFBCASH", "ETFBS80TR", "ETFBM40TR", "ETFBSPXPL", "ETFBNDQPL",
 }
 
 
@@ -714,6 +717,64 @@ def market_snapshot() -> dict:
     Powered by Yahoo Finance.
     """
     return get_market_snapshot()
+
+
+@mcp.tool()
+def commodity_snapshot() -> dict:
+    """Single-call commodity dashboard: copper, gold, silver, oil (WTI/Brent),
+    natural gas, USD index — for grounding stock-thesis reasoning.
+
+    Use this whenever a portfolio question hinges on raw materials:
+      - KGHM thesis → check copper trend
+      - PKN Orlen / Lotos thesis → check WTI/Brent
+      - JSW thesis → coking coal (NOT covered — see notes)
+      - Any USD-sensitive trade → check DXY
+
+    Returns price, 24h change %, RSI, EMA50 position, and a one-word trend
+    tag (uptrend/downtrend/overbought/oversold/etc.) per commodity. Failed
+    symbols are returned as ``null`` rather than raising — partial dashboard
+    is better than no dashboard.
+
+    Source: TradingView (free public endpoint via tradingview-ta).
+    """
+    return get_commodity_snapshot()
+
+
+@mcp.tool()
+def next_earnings(symbol: str) -> dict:
+    """Earnings calendar + recent EPS-surprise history for a US/global stock.
+
+    Use this BEFORE recommending a buy/add to avoid landing right before
+    an earnings release (a 2-day pre-earnings entry sees materially higher
+    drawdown risk than the rest of the quarter).
+
+    Args:
+        symbol: Yahoo Finance ticker — e.g. ``AAPL``, ``MSFT``, ``TSLA``,
+                ``THYAO.IS``. Polish (.WA) tickers are not covered by Yahoo's
+                earnings endpoint; use ``financial_news(category="pl_stocks")``
+                for GPW companies.
+
+    Returns:
+        ``{symbol, next_earnings_date, days_until, history: [...], source}``
+        — or ``{symbol, error, source}`` on rate-limit / coverage gap.
+    """
+    return get_earnings(symbol)
+
+
+@mcp.tool()
+def dividend_history(symbol: str) -> dict:
+    """Forward dividend yield + ex-date + payout history for a US/global stock.
+
+    Args:
+        symbol: Yahoo Finance ticker — e.g. ``DVN``, ``KO``, ``JNJ``.
+                Polish (.WA) tickers are not covered by this endpoint.
+
+    Returns:
+        ``{dividend_yield, ex_dividend_date, next_ex_date, next_dividend_date,
+        payout_ratio, five_year_avg_yield, last_dividend_value/date, source}``
+        — or ``{symbol, error, source}`` on rate-limit / coverage gap.
+    """
+    return get_dividends(symbol)
 
 
 @mcp.tool()
