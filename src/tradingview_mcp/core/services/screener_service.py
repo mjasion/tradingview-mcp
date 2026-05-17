@@ -14,10 +14,15 @@ from tradingview_mcp.core.types import (
 )
 from tradingview_mcp.core.services.coinlist import load_symbols
 from tradingview_mcp.core.services.indicators import compute_metrics
+from tradingview_mcp.core.services.tv_scanner import (
+    TVScannerEmpty,
+    TVScannerUnavailable,
+    ta_call,
+)
 from tradingview_mcp.core.utils.validators import EXCHANGE_SCREENER, get_market_type, get_tv_exchange_prefix
 
 try:
-    from tradingview_ta import get_multiple_analysis
+    import tradingview_ta  # noqa: F401  — presence check; ta_call uses it
     _TA_AVAILABLE = True
 except ImportError:
     _TA_AVAILABLE = False
@@ -61,9 +66,11 @@ def fetch_bollinger_analysis(
     screener = EXCHANGE_SCREENER.get(exchange, "crypto")
 
     try:
-        analysis = get_multiple_analysis(screener=screener, interval=timeframe, symbols=symbols)
-    except Exception as exc:
-        raise RuntimeError(f"Analysis failed: {exc}") from exc
+        analysis = ta_call(screener, timeframe, symbols)
+    except TVScannerUnavailable as exc:
+        raise RuntimeError(f"tradingview_scanner_unavailable: {exc}") from exc
+    except TVScannerEmpty as exc:
+        raise RuntimeError(f"Analysis returned no rows: {exc}") from exc
 
     rows: List[Row] = []
     for key, value in analysis.items():
@@ -136,8 +143,8 @@ def fetch_trending_analysis(
     for i in range(0, len(symbols), batch_size):
         batch = symbols[i : i + batch_size]
         try:
-            analysis = get_multiple_analysis(screener=screener, interval=timeframe, symbols=batch)
-        except Exception:
+            analysis = ta_call(screener, timeframe, batch)
+        except (TVScannerUnavailable, TVScannerEmpty):
             continue
 
         for key, value in analysis.items():
@@ -451,8 +458,31 @@ def analyze_coin(
     screener = EXCHANGE_SCREENER.get(exchange, "crypto")
 
     try:
-        analysis = get_multiple_analysis(screener=screener, interval=timeframe, symbols=[full_symbol])
+        analysis = ta_call(screener, timeframe, [full_symbol])
+    except TVScannerUnavailable as exc:
+        from tradingview_mcp.core.services.yahoo_fallback import (
+            analyze_coin_yahoo_fallback,
+        )
+        fb = analyze_coin_yahoo_fallback(symbol, exchange, timeframe)
+        if "error" not in fb:
+            fb["upstream_status"] = "tv_down"
+            fb["degraded"] = True
+            fb["upstream_detail"] = str(exc)
+            return fb
+        return {
+            "error": "tradingview_scanner_unavailable",
+            "upstream_status": "down",
+            "detail": str(exc),
+            "fallback_error": fb.get("error"),
+            "retry_hint": "TradingView scanner is degraded. Yahoo fallback also failed. "
+                          "Retry in 60–120s.",
+            "symbol": symbol, "exchange": exchange, "timeframe": timeframe,
+        }
+    except TVScannerEmpty:
+        return {"error": f"No data found for {symbol} on {exchange}",
+                "symbol": symbol, "exchange": exchange, "timeframe": timeframe}
 
+    try:
         if full_symbol not in analysis or analysis[full_symbol] is None:
             return {"error": f"No data found for {symbol} on {exchange}", "symbol": symbol, "exchange": exchange, "timeframe": timeframe}
 
@@ -576,9 +606,14 @@ def scan_consecutive_candles(
     screener = EXCHANGE_SCREENER.get(exchange, "crypto")
 
     try:
-        analysis = get_multiple_analysis(screener=screener, interval=timeframe, symbols=symbols)
-    except Exception as exc:
-        return {"error": f"Pattern analysis failed: {exc}", "exchange": exchange, "timeframe": timeframe}
+        analysis = ta_call(screener, timeframe, symbols)
+    except TVScannerUnavailable as exc:
+        return {"error": "tradingview_scanner_unavailable",
+                "upstream_status": "down", "detail": str(exc),
+                "exchange": exchange, "timeframe": timeframe}
+    except TVScannerEmpty as exc:
+        return {"error": f"Pattern analysis returned no rows: {exc}",
+                "exchange": exchange, "timeframe": timeframe}
 
     pattern_coins: list[dict] = []
 
@@ -691,7 +726,15 @@ def scan_advanced_candle_patterns_single_tf(
         return {"error": "tradingview_ta is missing; run `uv sync`."}
 
     screener = EXCHANGE_SCREENER.get(exchange, "crypto")
-    analysis = get_multiple_analysis(screener=screener, interval=base_timeframe, symbols=symbols)
+    try:
+        analysis = ta_call(screener, base_timeframe, symbols)
+    except TVScannerUnavailable as exc:
+        return {"error": "tradingview_scanner_unavailable",
+                "upstream_status": "down", "detail": str(exc),
+                "exchange": exchange, "base_timeframe": base_timeframe}
+    except TVScannerEmpty:
+        return {"error": "no_data", "exchange": exchange, "base_timeframe": base_timeframe,
+                "total_found": 0, "data": []}
     pattern_results: list[dict] = []
 
     for symbol, data in analysis.items():
@@ -771,9 +814,18 @@ def run_multi_timeframe_analysis(
     tf_results: dict = {}
     alignment_scores: list[int] = []
 
+    upstream_down = False
     for tf in timeframes:
         try:
-            analysis = get_multiple_analysis(screener=screener, interval=tf, symbols=[symbol])
+            try:
+                analysis = ta_call(screener, tf, [symbol])
+            except TVScannerUnavailable as exc:
+                tf_results[tf] = {"error": "tradingview_scanner_unavailable", "detail": str(exc)}
+                upstream_down = True
+                continue
+            except TVScannerEmpty:
+                tf_results[tf] = {"error": f"No data for {tf}"}
+                continue
             if symbol not in analysis or analysis[symbol] is None:
                 tf_results[tf] = {"error": f"No data for {tf}"}
                 continue
@@ -840,6 +892,10 @@ def run_multi_timeframe_analysis(
         "symbol": symbol,
         "exchange": exchange,
         "analysis_type": "Multi-Timeframe Alignment",
+        **({"upstream_status": "down",
+            "degraded": True,
+            "upstream_detail": "scanner.tradingview.com unavailable for one or more timeframes — "
+                                "partial results returned"} if upstream_down else {}),
         "timeframes": tf_results,
         "alignment": {
             "status": alignment,

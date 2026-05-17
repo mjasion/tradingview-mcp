@@ -15,6 +15,8 @@ Works with any symbol Yahoo Finance supports:
 from __future__ import annotations
 
 import json
+import threading
+import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
@@ -30,6 +32,14 @@ _TIMEOUT = 12
 _UA = "tradingview-mcp/0.5.0"
 _BASE = "https://query1.finance.yahoo.com/v8/finance/chart"
 _QUOTE_SUMMARY_BASE = "https://query1.finance.yahoo.com/v10/finance/quoteSummary"
+
+# Yahoo's /v10/quoteSummary endpoint silently 429s when too many concurrent
+# requests share an IP. portfolio_scan used to fan out 6+ workers in parallel,
+# each making 2 separate quoteSummary calls (earnings + dividends) — that hit
+# the threshold reliably. We cap concurrency at 3 here so the rest queue up
+# briefly instead of being rejected. The bound is process-wide so all callers
+# (portfolio_scan + ad-hoc next_earnings + dividend_history) share the budget.
+_QUOTE_SUMMARY_SEM = threading.BoundedSemaphore(3)
 
 # Yahoo's v10/quoteSummary endpoint requires a session crumb since 2023.
 # We cache the (cookies, crumb) tuple per process — a single bootstrap is
@@ -182,16 +192,32 @@ def _fetch_quote_summary(symbol: str, modules: list[str]) -> dict:
         _log.debug("bootstrapping Yahoo crumb token")
         _CRUMB_CACHE["crumb"], _CRUMB_CACHE["cookies"] = _bootstrap_crumb()
 
-    try:
-        data = _do_call(_CRUMB_CACHE["crumb"], _CRUMB_CACHE["cookies"])
-    except urllib.error.HTTPError as e:
-        if e.code in (401, 403):
-            _log.warning("Yahoo rejected our session (%s) — refreshing crumb and retrying", e.code)
-            _CRUMB_CACHE["crumb"], _CRUMB_CACHE["cookies"] = _bootstrap_crumb()
+    # Serialize through the semaphore so parallel callers don't trip the 429
+    # threshold. The wait is normally sub-second; we don't add a timeout because
+    # callers (portfolio_scan) already cap symbol count.
+    with _QUOTE_SUMMARY_SEM:
+        try:
             data = _do_call(_CRUMB_CACHE["crumb"], _CRUMB_CACHE["cookies"])
-        else:
-            _log.warning("Yahoo HTTP %s for %s", e.code, symbol)
-            raise
+        except urllib.error.HTTPError as e:
+            if e.code in (401, 403):
+                _log.warning("Yahoo rejected our session (%s) — refreshing crumb and retrying", e.code)
+                _CRUMB_CACHE["crumb"], _CRUMB_CACHE["cookies"] = _bootstrap_crumb()
+                data = _do_call(_CRUMB_CACHE["crumb"], _CRUMB_CACHE["cookies"])
+            elif e.code == 429:
+                # Respect Retry-After when Yahoo sends it; otherwise back off
+                # for a few seconds. One retry — beyond that the caller should
+                # treat it as a transient outage and try later.
+                retry_after_hdr = e.headers.get("Retry-After") if e.headers else None
+                try:
+                    delay = max(1.0, min(15.0, float(retry_after_hdr))) if retry_after_hdr else 4.0
+                except (TypeError, ValueError):
+                    delay = 4.0
+                _log.warning("Yahoo 429 for %s — backing off %.1fs and retrying once", symbol, delay)
+                time.sleep(delay)
+                data = _do_call(_CRUMB_CACHE["crumb"], _CRUMB_CACHE["cookies"])
+            else:
+                _log.warning("Yahoo HTTP %s for %s", e.code, symbol)
+                raise
 
     result = data.get("quoteSummary", {}).get("result") or []
     if not result:

@@ -19,6 +19,7 @@ sub-dict and do NOT block the rest of the scan.
 """
 from __future__ import annotations
 
+import collections
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
@@ -36,7 +37,11 @@ from tradingview_mcp.core.services.yahoo_finance_service import (
 _log = get_logger("scan")
 
 
-_DEFAULT_WORKERS = 6
+# 4 keeps Yahoo's quoteSummary endpoint under its 429 threshold while still
+# overlapping I/O. The semaphore inside yahoo_finance_service caps actual
+# Yahoo concurrency at 3 — anything higher here just adds queueing without
+# speeding up the scan.
+_DEFAULT_WORKERS = 4
 _RSI_OVERBOUGHT = 70.0
 _RSI_OVERSOLD = 30.0
 _EARNINGS_HORIZON_DAYS = 7
@@ -105,6 +110,14 @@ def _scan_one(
         out["rsi"] = (ta.get("rsi") or {}).get("value")
         out["volatility"] = (ta.get("atr") or {}).get("volatility")
         out["rating"] = (ta.get("market_sentiment") or {}).get("overall_rating")
+        # Propagate degradation markers so the summary can count them and
+        # downstream consumers know this is a fallback-derived data point.
+        if ta.get("degraded"):
+            out["degraded"] = True
+        if ta.get("data_source"):
+            out["data_source"] = ta["data_source"]
+        if ta.get("upstream_status"):
+            out["upstream_status"] = ta["upstream_status"]
 
     earnings = get_earnings(symbol)
     if "error" not in earnings:
@@ -199,9 +212,37 @@ def portfolio_scan(
         "with_flags": len(flagged),
         "errors": sum(1 for r in ordered if "error" in r or "ta_error" in r),
     }
+
+    # Degradation hint: when most TA errors share a root cause, that's an
+    # upstream outage — not a bunch of bad tickers. Surface it loudly so the
+    # caller (a model coordinating the scan) stops retrying the same way.
+    ta_errors = [str(r["ta_error"]) for r in ordered if r.get("ta_error")]
+    if ta_errors and len(ta_errors) >= max(2, int(len(ordered) * 0.5)):
+        top_msg, top_count = collections.Counter(ta_errors).most_common(1)[0]
+        is_tv_outage = "tradingview_scanner_unavailable" in top_msg
+        summary["upstream_warning"] = {
+            "ta_failure_ratio": round(len(ta_errors) / len(ordered), 2),
+            "most_common_error": top_msg,
+            "affected_count": top_count,
+            "likely_cause": "tradingview_scanner_outage" if is_tv_outage else "shared_ta_failure",
+            "recommended_action": (
+                "scanner.tradingview.com is degraded. Wait 60-120s and retry, "
+                "or rely on coin_analysis individually — it auto-falls back to Yahoo."
+                if is_tv_outage else
+                "Inspect the ta_error field on individual results; the same "
+                "error across many symbols usually points at an upstream issue."
+            ),
+        }
+
+    # Count results that came from the Yahoo fallback so the caller can
+    # contextualize numbers as "degraded but real" vs missing.
+    degraded = sum(1 for r in ordered if r.get("degraded") or r.get("data_source") == "yahoo_fallback")
+    if degraded:
+        summary["degraded_count"] = degraded
+
     elapsed = time.perf_counter() - started
-    _log.info("portfolio_scan done in %.1fs — %d flagged, %d errored",
-              elapsed, summary["with_flags"], summary["errors"])
+    _log.info("portfolio_scan done in %.1fs — %d flagged, %d errored, %d degraded",
+              elapsed, summary["with_flags"], summary["errors"], degraded)
 
     return {
         "results": ordered,

@@ -24,11 +24,28 @@ from tradingview_mcp.core.services.indicators import (
 )
 from tradingview_mcp.core.utils.validators import EXCHANGE_SCREENER, sanitize_timeframe
 
+from tradingview_mcp.core.services.tv_scanner import (
+    TVScannerEmpty,
+    TVScannerUnavailable,
+    ta_call as _ta_call,
+)
+
 try:
-    from tradingview_ta import get_multiple_analysis
+    import tradingview_ta  # noqa: F401
     _TA_AVAILABLE = True
 except ImportError:
     _TA_AVAILABLE = False
+
+
+def get_multiple_analysis(*, screener, interval, symbols):
+    """Local adapter so EGX keeps the call-site shape while gaining retries.
+
+    Raises the same exceptions as ``tradingview_ta.get_multiple_analysis``-ish
+    behavior: on outage it raises ``TVScannerUnavailable`` (the EGX call sites
+    catch broad ``Exception`` so this still degrades gracefully); on empty
+    result it raises ``TVScannerEmpty``.
+    """
+    return _ta_call(screener, interval, symbols)
 
 try:
     from tradingview_screener import Query

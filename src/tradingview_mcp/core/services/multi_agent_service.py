@@ -7,10 +7,15 @@ All functions are pure business logic with no MCP coupling.
 from __future__ import annotations
 
 from tradingview_mcp.core.services.indicators import compute_metrics
+from tradingview_mcp.core.services.tv_scanner import (
+    TVScannerEmpty,
+    TVScannerUnavailable,
+    ta_call,
+)
 from tradingview_mcp.core.utils.validators import EXCHANGE_SCREENER
 
 try:
-    from tradingview_ta import get_multiple_analysis
+    import tradingview_ta  # noqa: F401
     _TA_AVAILABLE = True
 except ImportError:
     _TA_AVAILABLE = False
@@ -128,11 +133,16 @@ def run_multi_agent_analysis(
     """
     screener = EXCHANGE_SCREENER.get(exchange, "crypto")
 
-    analysis = get_multiple_analysis(
-        screener=screener,
-        interval=timeframe,
-        symbols=[symbol],
-    )
+    try:
+        analysis = ta_call(screener, timeframe, [symbol])
+    except TVScannerUnavailable as exc:
+        return {"error": "tradingview_scanner_unavailable",
+                "upstream_status": "down", "detail": str(exc),
+                "symbol": symbol, "timeframe": timeframe,
+                "retry_hint": "scanner.tradingview.com degraded — retry in 60-120s "
+                              "or use coin_analysis (which has a Yahoo fallback)."}
+    except TVScannerEmpty:
+        return {"error": f"No data found for {symbol}"}
 
     if symbol not in analysis or analysis[symbol] is None:
         return {"error": f"No data found for {symbol}"}

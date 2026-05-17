@@ -32,8 +32,14 @@ from tradingview_mcp.core.services.log import get_logger
 
 _log = get_logger("commodity")
 
+from tradingview_mcp.core.services.tv_scanner import (
+    TVScannerEmpty,
+    TVScannerUnavailable,
+    ta_call,
+)
+
 try:
-    from tradingview_ta import get_multiple_analysis  # type: ignore
+    import tradingview_ta  # type: ignore  # noqa: F401
     _TA_AVAILABLE = True
 except ImportError:  # pragma: no cover
     _TA_AVAILABLE = False
@@ -126,9 +132,16 @@ def get_commodity_snapshot() -> dict:
         symbols = [sym for _, sym in items]
         _log.debug("querying TradingView '%s' screener for %d symbols", screener, len(symbols))
         try:
-            analysis = get_multiple_analysis(
-                screener=screener, interval=_TIMEFRAME, symbols=symbols
-            )
+            analysis = ta_call(screener, _TIMEFRAME, symbols)
+        except TVScannerUnavailable as e:
+            _log.warning("TradingView %s screener degraded: %s", screener, e)
+            out.setdefault("errors", []).append(f"{screener}: tradingview_scanner_unavailable")
+            out["upstream_status"] = "down"
+            continue
+        except TVScannerEmpty as e:
+            _log.warning("TradingView %s screener returned empty: %s", screener, e)
+            out.setdefault("errors", []).append(f"{screener}: no_data")
+            continue
         except Exception as e:
             _log.warning("TradingView %s screener failed: %s", screener, e)
             out.setdefault("errors", []).append(

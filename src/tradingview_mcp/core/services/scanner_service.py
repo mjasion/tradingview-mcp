@@ -10,10 +10,15 @@ from typing import List
 
 from tradingview_mcp.core.services.coinlist import load_symbols
 from tradingview_mcp.core.services.indicators import compute_metrics
+from tradingview_mcp.core.services.tv_scanner import (
+    TVScannerEmpty,
+    TVScannerUnavailable,
+    ta_call,
+)
 from tradingview_mcp.core.utils.validators import EXCHANGE_SCREENER, is_stock_exchange
 
 try:
-    from tradingview_ta import get_multiple_analysis
+    import tradingview_ta  # noqa: F401
     _TA_AVAILABLE = True
 except ImportError:
     _TA_AVAILABLE = False
@@ -52,8 +57,8 @@ def volume_breakout_scan(
     for i in range(0, min(len(symbols), 500), batch_size):
         batch = symbols[i : i + batch_size]
         try:
-            analysis = get_multiple_analysis(screener=screener, interval=timeframe, symbols=batch)
-        except Exception:
+            analysis = ta_call(screener, timeframe, batch)
+        except (TVScannerUnavailable, TVScannerEmpty):
             continue
 
         for symbol, data in analysis.items():
@@ -143,7 +148,14 @@ def volume_confirmation_analyze(
     screener = EXCHANGE_SCREENER.get(exchange, "crypto")
 
     try:
-        analysis = get_multiple_analysis(screener=screener, interval=timeframe, symbols=[full_symbol])
+        try:
+            analysis = ta_call(screener, timeframe, [full_symbol])
+        except TVScannerUnavailable as exc:
+            return {"error": "tradingview_scanner_unavailable",
+                    "upstream_status": "down", "detail": str(exc),
+                    "symbol": full_symbol}
+        except TVScannerEmpty:
+            return {"error": f"No data found for {full_symbol}"}
         if not analysis or full_symbol not in analysis:
             return {"error": f"No data found for {full_symbol}"}
 
