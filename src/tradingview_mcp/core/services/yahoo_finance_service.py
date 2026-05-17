@@ -36,10 +36,68 @@ _QUOTE_SUMMARY_BASE = "https://query1.finance.yahoo.com/v10/finance/quoteSummary
 # Yahoo's /v10/quoteSummary endpoint silently 429s when too many concurrent
 # requests share an IP. portfolio_scan used to fan out 6+ workers in parallel,
 # each making 2 separate quoteSummary calls (earnings + dividends) — that hit
-# the threshold reliably. We cap concurrency at 3 here so the rest queue up
+# the threshold reliably. We cap concurrency at 2 here so the rest queue up
 # briefly instead of being rejected. The bound is process-wide so all callers
 # (portfolio_scan + ad-hoc next_earnings + dividend_history) share the budget.
-_QUOTE_SUMMARY_SEM = threading.BoundedSemaphore(3)
+# NOTE: deliberately 1, not 2. Real-world traces show that even sequential
+# tool calls (next_earnings → next_earnings → dividend_history, seconds
+# apart) all 429 against Yahoo — meaning the rate-limit budget is far smaller
+# than "a couple in flight". Pure sequential through quoteSummary lets the
+# global cooldown gate below soak up 429s for the entire process. Other
+# endpoints (chart/price) are unaffected.
+_QUOTE_SUMMARY_SEM = threading.BoundedSemaphore(1)
+
+# Process-wide cooldown: when ANY worker observes a 429, every other worker
+# pauses until the Retry-After window expires. Without this gate, three
+# parallel workers all see 429 at the same time and each sleeps independently
+# — when they wake up they hit Yahoo simultaneously again and get re-banned.
+# A shared cooldown timestamp lets the first 429 absorb the burst for everyone.
+_RATE_LIMIT_LOCK = threading.Lock()
+_RATE_LIMIT_COOLDOWN_UNTIL = 0.0  # time.monotonic()-based
+
+
+class YahooRateLimited(RuntimeError):
+    """Yahoo returned HTTP 429 after we already retried once.
+
+    Carries the suggested retry delay so callers (and ultimately the MCP
+    response) can tell the model how long to wait before trying again,
+    instead of swallowing the rate limit as a generic 'HTTPError 429'.
+    """
+
+    def __init__(self, retry_after_seconds: float, detail: str = ""):
+        self.retry_after_seconds = retry_after_seconds
+        super().__init__(detail or f"Yahoo rate-limited; retry in {retry_after_seconds:.0f}s")
+
+
+def _wait_for_rate_limit_window() -> None:
+    """Block until any active cooldown set by a previous 429 has expired."""
+    while True:
+        with _RATE_LIMIT_LOCK:
+            remaining = _RATE_LIMIT_COOLDOWN_UNTIL - time.monotonic()
+            if remaining <= 0:
+                return
+        # Sleep in short slices so a longer cooldown overrides without us
+        # holding the lock across the wait.
+        time.sleep(min(remaining, 1.0))
+
+
+def _record_rate_limit(retry_after_seconds: float) -> None:
+    """Extend the process-wide cooldown so other workers also back off."""
+    global _RATE_LIMIT_COOLDOWN_UNTIL
+    with _RATE_LIMIT_LOCK:
+        target = time.monotonic() + retry_after_seconds
+        if target > _RATE_LIMIT_COOLDOWN_UNTIL:
+            _RATE_LIMIT_COOLDOWN_UNTIL = target
+
+
+def _parse_retry_after(header_value: Optional[str], default: float = 8.0) -> float:
+    """Convert a Retry-After header value to a sane delay in seconds."""
+    if not header_value:
+        return default
+    try:
+        return max(1.0, min(60.0, float(header_value)))
+    except (TypeError, ValueError):
+        return default
 
 # Yahoo's v10/quoteSummary endpoint requires a session crumb since 2023.
 # We cache the (cookies, crumb) tuple per process — a single bootstrap is
@@ -192,6 +250,12 @@ def _fetch_quote_summary(symbol: str, modules: list[str]) -> dict:
         _log.debug("bootstrapping Yahoo crumb token")
         _CRUMB_CACHE["crumb"], _CRUMB_CACHE["cookies"] = _bootstrap_crumb()
 
+    # First wait out any active cooldown set by a previous 429 anywhere in
+    # the process. Doing this BEFORE we grab the semaphore means we don't
+    # hold the (2-slot) budget while idle — other unrelated callers can still
+    # make progress if the cooldown is short.
+    _wait_for_rate_limit_window()
+
     # Serialize through the semaphore so parallel callers don't trip the 429
     # threshold. The wait is normally sub-second; we don't add a timeout because
     # callers (portfolio_scan) already cap symbol count.
@@ -205,16 +269,32 @@ def _fetch_quote_summary(symbol: str, modules: list[str]) -> dict:
                 data = _do_call(_CRUMB_CACHE["crumb"], _CRUMB_CACHE["cookies"])
             elif e.code == 429:
                 # Respect Retry-After when Yahoo sends it; otherwise back off
-                # for a few seconds. One retry — beyond that the caller should
-                # treat it as a transient outage and try later.
+                # for a few seconds. Record the cooldown globally so other
+                # workers don't keep banging on the door while we wait. One
+                # retry — beyond that the caller gets a typed YahooRateLimited
+                # with the retry hint to pass up to the MCP response.
                 retry_after_hdr = e.headers.get("Retry-After") if e.headers else None
-                try:
-                    delay = max(1.0, min(15.0, float(retry_after_hdr))) if retry_after_hdr else 4.0
-                except (TypeError, ValueError):
-                    delay = 4.0
-                _log.warning("Yahoo 429 for %s — backing off %.1fs and retrying once", symbol, delay)
+                delay = _parse_retry_after(retry_after_hdr, default=8.0)
+                _record_rate_limit(delay)
+                _log.warning(
+                    "Yahoo 429 for %s — Retry-After=%s, backing off %.1fs (process-wide cooldown set) and retrying once",
+                    symbol, retry_after_hdr or "<none>", delay,
+                )
                 time.sleep(delay)
-                data = _do_call(_CRUMB_CACHE["crumb"], _CRUMB_CACHE["cookies"])
+                try:
+                    data = _do_call(_CRUMB_CACHE["crumb"], _CRUMB_CACHE["cookies"])
+                except urllib.error.HTTPError as e2:
+                    if e2.code == 429:
+                        # Still rate-limited. Extend the cooldown and surface
+                        # a typed exception with the retry hint.
+                        second_hdr = e2.headers.get("Retry-After") if e2.headers else None
+                        second_delay = _parse_retry_after(second_hdr, default=delay * 2)
+                        _record_rate_limit(second_delay)
+                        raise YahooRateLimited(
+                            retry_after_seconds=second_delay,
+                            detail=f"Yahoo Finance rate limit persisted after one retry for {symbol}",
+                        ) from e2
+                    raise
             else:
                 _log.warning("Yahoo HTTP %s for %s", e.code, symbol)
                 raise
@@ -224,6 +304,32 @@ def _fetch_quote_summary(symbol: str, modules: list[str]) -> dict:
         err = data.get("quoteSummary", {}).get("error", {}).get("description") or "no result"
         raise ValueError(f"empty quoteSummary for {symbol}: {err}")
     return result[0]
+
+
+def _rate_limited_response(base: dict, exc: YahooRateLimited) -> dict:
+    """Translate a YahooRateLimited into the structured envelope every tool
+    returns when the upstream is throttling us.
+
+    The shape mirrors the ``upstream_status: "down"`` envelope from
+    ``tv_scanner.ta_call_or_error`` so the MCP caller can branch on a single
+    field. ``retry_after_seconds`` is the value Yahoo asked us to wait
+    (parsed from the Retry-After header when present, otherwise a sane
+    default). Without this, callers got an opaque ``HTTPError 429`` string
+    and couldn't tell rate-limiting apart from a permanently dead symbol.
+    """
+    retry_in = max(1.0, exc.retry_after_seconds)
+    return {
+        **base,
+        "error": "yahoo_rate_limited",
+        "upstream_status": "rate_limited",
+        "retry_after_seconds": int(round(retry_in)),
+        "retry_hint": (
+            f"Yahoo Finance is rate-limiting our IP — retry this symbol in "
+            f"~{int(round(retry_in))}s. Other tools (TradingView TA, Stooq, news) "
+            f"are unaffected."
+        ),
+        "detail": str(exc),
+    }
 
 
 def _ts_to_iso(ts: Optional[int]) -> Optional[str]:
@@ -246,6 +352,8 @@ def get_earnings(symbol: str) -> dict:
     out: dict = {"symbol": symbol.upper(), "source": "Yahoo Finance"}
     try:
         block = _fetch_quote_summary(symbol, ["calendarEvents", "earningsHistory"])
+    except YahooRateLimited as e:
+        return _rate_limited_response(out, e)
     except Exception as e:
         return {**out, "error": f"{type(e).__name__}: {e}"}
 
@@ -297,6 +405,8 @@ def get_dividends(symbol: str) -> dict:
         block = _fetch_quote_summary(
             symbol, ["summaryDetail", "calendarEvents", "defaultKeyStatistics"]
         )
+    except YahooRateLimited as e:
+        return _rate_limited_response(out, e)
     except Exception as e:
         return {**out, "error": f"{type(e).__name__}: {e}"}
 

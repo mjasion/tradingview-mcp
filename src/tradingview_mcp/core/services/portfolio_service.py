@@ -125,6 +125,11 @@ def _scan_one(
         out["earnings_days_until"] = earnings.get("days_until")
     else:
         out["earnings_error"] = earnings["error"]
+        # Propagate Yahoo's retry hint up to the caller. The summary
+        # aggregator uses this to surface "Yahoo throttled, wait ~Ns" once
+        # for the whole scan rather than per-symbol.
+        if earnings.get("upstream_status") == "rate_limited":
+            out["earnings_retry_after"] = earnings.get("retry_after_seconds")
 
     dividends = get_dividends(symbol)
     if "error" not in dividends:
@@ -132,6 +137,8 @@ def _scan_one(
         out["next_ex_date"] = dividends.get("next_ex_date")
     else:
         out["dividend_error"] = dividends["error"]
+        if dividends.get("upstream_status") == "rate_limited":
+            out["dividend_retry_after"] = dividends.get("retry_after_seconds")
 
     news_count = 0
     try:
@@ -239,6 +246,28 @@ def portfolio_scan(
     degraded = sum(1 for r in ordered if r.get("degraded") or r.get("data_source") == "yahoo_fallback")
     if degraded:
         summary["degraded_count"] = degraded
+
+    # Yahoo rate-limit aggregation: when many rows surface a retry_after,
+    # tell the caller once with the worst delay so it knows "wait N seconds
+    # before re-running, don't immediately retry symbol-by-symbol".
+    yahoo_throttled = [
+        r for r in ordered
+        if r.get("earnings_retry_after") is not None or r.get("dividend_retry_after") is not None
+    ]
+    if yahoo_throttled:
+        worst_retry = max(
+            max(r.get("earnings_retry_after") or 0, r.get("dividend_retry_after") or 0)
+            for r in yahoo_throttled
+        )
+        summary["yahoo_rate_limit"] = {
+            "affected_symbols": len(yahoo_throttled),
+            "retry_after_seconds": int(worst_retry),
+            "recommended_action": (
+                f"Yahoo Finance is rate-limiting our IP (earnings/dividends "
+                f"for {len(yahoo_throttled)} symbols missing). Wait ~{int(worst_retry)}s "
+                f"before re-running portfolio_scan; TA + news data are still fresh."
+            ),
+        }
 
     elapsed = time.perf_counter() - started
     _log.info("portfolio_scan done in %.1fs — %d flagged, %d errored, %d degraded",
