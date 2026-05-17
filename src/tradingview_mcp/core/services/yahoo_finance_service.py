@@ -99,6 +99,49 @@ def _parse_retry_after(header_value: Optional[str], default: float = 8.0) -> flo
     except (TypeError, ValueError):
         return default
 
+
+# ── Circuit breaker for persistent 429s ───────────────────────────────────────
+#
+# When we have NO proxy and Yahoo's per-IP daily quota is hit, no amount of
+# Retry-After backoff helps — every call burns time waiting + a request, only
+# to get 429 again. The circuit breaker trips after one persistent failure
+# (a 429 that survived our in-line retry) and stays open for ``_BREAKER_OPEN_SECONDS``.
+# While open, every quoteSummary caller short-circuits to a rate_limited
+# response WITHOUT hitting Yahoo. That:
+#   * makes portfolio_scan return in ~ms instead of minutes when Yahoo is down,
+#   * stops adding to the bad-actor score that may extend the block,
+#   * gives the LLM one clear "wait N minutes" hint instead of N opaque errors.
+#
+# After the window expires, the breaker half-opens: the next call IS sent. If
+# it succeeds, the breaker resets; if it 429s again, the window is renewed.
+_BREAKER_OPEN_SECONDS = 300.0  # 5 minutes — long enough to outlast a transient
+                                # rolling-window block, short enough that a
+                                # daily quota reset isn't far behind.
+_BREAKER_OPEN_UNTIL = 0.0
+
+
+def _breaker_is_open() -> tuple[bool, float]:
+    """Return (open?, seconds_remaining)."""
+    with _RATE_LIMIT_LOCK:
+        remaining = _BREAKER_OPEN_UNTIL - time.monotonic()
+        return (remaining > 0, max(0.0, remaining))
+
+
+def _trip_breaker(seconds: float = _BREAKER_OPEN_SECONDS) -> None:
+    """Open the breaker for ``seconds`` seconds, extending any existing window."""
+    global _BREAKER_OPEN_UNTIL
+    with _RATE_LIMIT_LOCK:
+        target = time.monotonic() + seconds
+        if target > _BREAKER_OPEN_UNTIL:
+            _BREAKER_OPEN_UNTIL = target
+
+
+def _reset_breaker() -> None:
+    """Close the breaker after a successful Yahoo call."""
+    global _BREAKER_OPEN_UNTIL
+    with _RATE_LIMIT_LOCK:
+        _BREAKER_OPEN_UNTIL = 0.0
+
 # Yahoo's v10/quoteSummary endpoint requires a session crumb since 2023.
 # We cache the (cookies, crumb) tuple per process — a single bootstrap is
 # enough for the lifetime of an MCP server invocation. None means "not yet
@@ -257,6 +300,24 @@ def _fetch_quote_summary(symbol: str, modules: list[str]) -> dict:
             return json.loads(resp.read().decode("utf-8"))
 
     _log.info("asking Yahoo Finance about %s (%s)", symbol.upper(), ", ".join(modules))
+
+    # Circuit breaker: if a previous call confirmed Yahoo is rate-limiting this
+    # IP, don't even send the request. Return the same typed exception so the
+    # caller renders the structured rate_limited envelope without waiting.
+    open_, remaining = _breaker_is_open()
+    if open_:
+        _log.warning(
+            "Yahoo circuit-breaker OPEN — skipping call for %s (%.0fs remaining)",
+            symbol, remaining,
+        )
+        raise YahooRateLimited(
+            retry_after_seconds=remaining,
+            detail=(
+                f"Yahoo Finance circuit-breaker open ({remaining:.0f}s remaining) — "
+                f"recent persistent 429s. Wait for the breaker to close before retrying."
+            ),
+        )
+
     if _CRUMB_CACHE["crumb"] is None:
         _log.debug("bootstrapping Yahoo crumb token")
         _CRUMB_CACHE["crumb"], _CRUMB_CACHE["cookies"] = _bootstrap_crumb()
@@ -296,14 +357,25 @@ def _fetch_quote_summary(symbol: str, modules: list[str]) -> dict:
                     data = _do_call(_CRUMB_CACHE["crumb"], _CRUMB_CACHE["cookies"])
                 except urllib.error.HTTPError as e2:
                     if e2.code == 429:
-                        # Still rate-limited. Extend the cooldown and surface
-                        # a typed exception with the retry hint.
+                        # Still rate-limited. This is the trigger for the
+                        # circuit breaker: a retry-after-wait still 429s means
+                        # we're not just bursting, we're banned. Trip the
+                        # breaker so subsequent calls skip Yahoo entirely.
                         second_hdr = e2.headers.get("Retry-After") if e2.headers else None
                         second_delay = _parse_retry_after(second_hdr, default=delay * 2)
                         _record_rate_limit(second_delay)
+                        _trip_breaker()
+                        _log.warning(
+                            "Yahoo persistent 429 for %s — opening circuit breaker for %.0fs",
+                            symbol, _BREAKER_OPEN_SECONDS,
+                        )
                         raise YahooRateLimited(
-                            retry_after_seconds=second_delay,
-                            detail=f"Yahoo Finance rate limit persisted after one retry for {symbol}",
+                            retry_after_seconds=max(second_delay, _BREAKER_OPEN_SECONDS),
+                            detail=(
+                                f"Yahoo Finance rate limit persisted after one retry for {symbol}. "
+                                f"Circuit breaker opened for {_BREAKER_OPEN_SECONDS:.0f}s; "
+                                f"subsequent calls will short-circuit until it closes."
+                            ),
                         ) from e2
                     raise
             else:
@@ -314,6 +386,9 @@ def _fetch_quote_summary(symbol: str, modules: list[str]) -> dict:
     if not result:
         err = data.get("quoteSummary", {}).get("error", {}).get("description") or "no result"
         raise ValueError(f"empty quoteSummary for {symbol}: {err}")
+
+    # A successful call closes the breaker — Yahoo is responding again.
+    _reset_breaker()
     return result[0]
 
 
@@ -329,16 +404,28 @@ def _rate_limited_response(base: dict, exc: YahooRateLimited) -> dict:
     and couldn't tell rate-limiting apart from a permanently dead symbol.
     """
     retry_in = max(1.0, exc.retry_after_seconds)
+    breaker_open, _ = _breaker_is_open()
+    if breaker_open:
+        hint = (
+            f"Yahoo Finance is throttling this IP. Circuit breaker open for "
+            f"~{int(round(retry_in))}s — subsequent next_earnings / dividend_history "
+            f"calls will short-circuit with this status (no request sent) until the "
+            f"breaker closes. TradingView TA, chart-based price data, Stooq and news "
+            f"endpoints are unaffected."
+        )
+    else:
+        hint = (
+            f"Yahoo Finance is rate-limiting our IP — retry this symbol in "
+            f"~{int(round(retry_in))}s. Other tools (TradingView TA, Stooq, news) "
+            f"are unaffected."
+        )
     return {
         **base,
         "error": "yahoo_rate_limited",
         "upstream_status": "rate_limited",
         "retry_after_seconds": int(round(retry_in)),
-        "retry_hint": (
-            f"Yahoo Finance is rate-limiting our IP — retry this symbol in "
-            f"~{int(round(retry_in))}s. Other tools (TradingView TA, Stooq, news) "
-            f"are unaffected."
-        ),
+        "circuit_breaker_open": breaker_open,
+        "retry_hint": hint,
         "detail": str(exc),
     }
 

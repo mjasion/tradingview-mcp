@@ -24,17 +24,19 @@ from tradingview_mcp.core.services import yahoo_finance_service as yfs
 
 @pytest.fixture(autouse=True)
 def _reset_state(monkeypatch):
-    """Each test starts with a fresh cooldown and a stubbed crumb."""
+    """Each test starts with a fresh cooldown, closed breaker, and stub crumb."""
     yfs._CRUMB_CACHE["crumb"] = "test-crumb"
     yfs._CRUMB_CACHE["cookies"] = "test=1"
     with yfs._RATE_LIMIT_LOCK:
         yfs._RATE_LIMIT_COOLDOWN_UNTIL = 0.0
+        yfs._BREAKER_OPEN_UNTIL = 0.0
     # Don't actually sleep during retries — the timing logic is verified
     # separately via the cooldown gate.
     monkeypatch.setattr(yfs.time, "sleep", lambda _s: None)
     yield
     with yfs._RATE_LIMIT_LOCK:
         yfs._RATE_LIMIT_COOLDOWN_UNTIL = 0.0
+        yfs._BREAKER_OPEN_UNTIL = 0.0
 
 
 def _make_429(retry_after: str | None = "12") -> urllib.error.HTTPError:
@@ -222,6 +224,75 @@ def test_rate_limited_response_not_cached(monkeypatch):
 
 
 # ── Sequential semaphore (no parallelism on quoteSummary) ─────────────────────
+
+
+# ── Circuit breaker ───────────────────────────────────────────────────────────
+
+
+def test_persistent_429_trips_circuit_breaker(monkeypatch):
+    """Two consecutive 429s must open the breaker for future calls."""
+    def responder(req):  # noqa: ARG001
+        raise _make_429("5")
+
+    _patch_opener(monkeypatch, responder)
+    with pytest.raises(yfs.YahooRateLimited):
+        yfs._fetch_quote_summary("AAPL", ["calendarEvents"])
+    open_, remaining = yfs._breaker_is_open()
+    assert open_
+    assert remaining > 0
+
+
+def test_open_breaker_short_circuits_without_calling_yahoo(monkeypatch):
+    """Once the breaker is open, no request hits the network."""
+    calls = []
+
+    def responder(req):  # noqa: ARG001
+        calls.append(1)
+        raise AssertionError("opener.open should not be invoked while breaker is open")
+
+    _patch_opener(monkeypatch, responder)
+    yfs._trip_breaker(60.0)
+
+    with pytest.raises(yfs.YahooRateLimited):
+        yfs._fetch_quote_summary("AAPL", ["calendarEvents"])
+    assert calls == []  # network was never touched
+
+
+def test_successful_call_resets_breaker(monkeypatch):
+    """A good response after the breaker window closes must reset it."""
+    # Manually close the breaker to simulate the window having elapsed.
+    yfs._reset_breaker()
+
+    def responder(req):  # noqa: ARG001
+        class _Resp:
+            def __enter__(self_): return self_
+            def __exit__(self_, *a): return False
+            def read(self_):
+                return b'{"quoteSummary": {"result": [{"calendarEvents": {}}]}}'
+        return _Resp()
+
+    _patch_opener(monkeypatch, responder)
+    # Open the breaker, then push the window into the past so the next call
+    # gets through — simulates the cooldown having elapsed naturally.
+    yfs._trip_breaker(60.0)
+    with yfs._RATE_LIMIT_LOCK:
+        yfs._BREAKER_OPEN_UNTIL = time.monotonic() - 1.0
+
+    yfs._fetch_quote_summary("AAPL", ["calendarEvents"])
+    open_, _ = yfs._breaker_is_open()
+    assert not open_
+
+
+def test_get_earnings_envelope_includes_circuit_breaker_flag(monkeypatch):
+    """The rate-limited envelope must expose ``circuit_breaker_open`` so
+    callers can tell ‘slow down for a moment’ apart from ‘back off for minutes’."""
+    yfs._trip_breaker(120.0)
+    monkeypatch.setattr(yfs, "_fetch_quote_summary",
+                        lambda *a, **kw: (_ for _ in ()).throw(
+                            yfs.YahooRateLimited(retry_after_seconds=120)))
+    out = yfs.get_earnings("BREAKERSYM1")
+    assert out["circuit_breaker_open"] is True
+    assert "short-circuit" in out["retry_hint"]
 
 
 def test_quote_summary_semaphore_is_strictly_sequential(monkeypatch):
