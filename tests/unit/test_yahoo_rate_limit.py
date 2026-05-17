@@ -49,6 +49,25 @@ def _make_429(retry_after: str | None = "12") -> urllib.error.HTTPError:
     )
 
 
+class _FakeOpener:
+    """Stand-in for ``build_opener_with_proxy()`` — yields a fixed sequence."""
+
+    def __init__(self, responder):
+        self._responder = responder
+        self.addheaders = []
+
+    def open(self, req, timeout=None):  # noqa: ARG002
+        return self._responder(req)
+
+
+def _patch_opener(monkeypatch, responder):
+    """Make every quoteSummary opener.open() call go through ``responder``."""
+    monkeypatch.setattr(
+        yfs, "build_opener_with_proxy",
+        lambda *a, **kw: _FakeOpener(responder),
+    )
+
+
 # ── Retry-After parsing ───────────────────────────────────────────────────────
 
 
@@ -109,7 +128,7 @@ def test_first_429_retries_then_succeeds(monkeypatch):
     """One 429, then a successful response — caller sees the success."""
     calls = []
 
-    def fake_urlopen(req, timeout=None):  # noqa: ARG001
+    def responder(req):  # noqa: ARG001
         calls.append(1)
         if len(calls) == 1:
             raise _make_429("3")
@@ -121,7 +140,7 @@ def test_first_429_retries_then_succeeds(monkeypatch):
                 return b'{"quoteSummary": {"result": [{"calendarEvents": {}}]}}'
         return _Resp()
 
-    monkeypatch.setattr(yfs.urllib.request, "urlopen", fake_urlopen)
+    _patch_opener(monkeypatch, responder)
     result = yfs._fetch_quote_summary("AAPL", ["calendarEvents"])
     assert "calendarEvents" in result
     assert len(calls) == 2  # exactly one retry
@@ -130,11 +149,11 @@ def test_first_429_retries_then_succeeds(monkeypatch):
 def test_two_consecutive_429s_raise_yahoo_rate_limited(monkeypatch):
     calls = []
 
-    def fake_urlopen(req, timeout=None):  # noqa: ARG001
+    def responder(req):  # noqa: ARG001
         calls.append(1)
         raise _make_429("10")
 
-    monkeypatch.setattr(yfs.urllib.request, "urlopen", fake_urlopen)
+    _patch_opener(monkeypatch, responder)
     with pytest.raises(yfs.YahooRateLimited) as ei:
         yfs._fetch_quote_summary("AAPL", ["calendarEvents"])
     assert ei.value.retry_after_seconds >= 10
@@ -143,8 +162,10 @@ def test_two_consecutive_429s_raise_yahoo_rate_limited(monkeypatch):
 
 def test_yahoo_rate_limited_records_cooldown_for_other_callers(monkeypatch):
     """When a 429 happens, the cooldown must be set for the whole process."""
-    monkeypatch.setattr(yfs.urllib.request, "urlopen",
-                        lambda *a, **kw: (_ for _ in ()).throw(_make_429("8")))
+    def responder(req):  # noqa: ARG001
+        raise _make_429("8")
+
+    _patch_opener(monkeypatch, responder)
     with pytest.raises(yfs.YahooRateLimited):
         yfs._fetch_quote_summary("AAPL", ["calendarEvents"])
 
@@ -211,7 +232,7 @@ def test_quote_summary_semaphore_is_strictly_sequential(monkeypatch):
     max_seen = []
     barrier = threading.Lock()
 
-    def fake_urlopen(req, timeout=None):  # noqa: ARG001
+    def responder(req):  # noqa: ARG001
         with barrier:
             in_flight.append(1)
             max_seen.append(len(in_flight))
@@ -226,7 +247,7 @@ def test_quote_summary_semaphore_is_strictly_sequential(monkeypatch):
                 return b'{"quoteSummary": {"result": [{"calendarEvents": {}}]}}'
         return _Resp()
 
-    monkeypatch.setattr(yfs.urllib.request, "urlopen", fake_urlopen)
+    _patch_opener(monkeypatch, responder)
 
     # Don't no-op the real time.sleep inside the worker — we need it.
     # The autouse fixture stubs yfs.time.sleep (used for backoff). The

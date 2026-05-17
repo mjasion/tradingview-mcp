@@ -73,15 +73,22 @@ def get_proxy() -> Optional[dict]:
 
 def build_opener_with_proxy(
     user_agent: str = "tradingview-mcp/0.5.0",
+    *,
+    extra_handlers: tuple = (),
 ) -> urllib.request.OpenerDirector:
     """
     Build a urllib OpenerDirector with proxy if configured, plain opener otherwise.
     Services degrade gracefully when no proxy is set — no crashes.
-    """
-    opener = urllib.request.build_opener()
-    opener.addheaders = [("User-Agent", user_agent)]
 
+    Pass ``extra_handlers`` (e.g. ``HTTPCookieProcessor``) when the caller
+    needs cookie-jar persistence or any other handler stacked under the same
+    opener. Without this, callers that built their own opener bypassed the
+    proxy entirely — that's what put Yahoo's quoteSummary endpoint into a
+    permanent 429 on the container's outbound IP.
+    """
     if not is_proxy_configured():
+        opener = urllib.request.build_opener(*extra_handlers)
+        opener.addheaders = [("User-Agent", user_agent)]
         return opener
 
     proxy_url = get_proxy_url()
@@ -94,7 +101,7 @@ def build_opener_with_proxy(
     pwd_mgr.add_password(None, f"http://{c['host']}:{c['port']}", username, c["password"])
     auth_handler = urllib.request.ProxyBasicAuthHandler(pwd_mgr)
 
-    opener = urllib.request.build_opener(proxy_handler, auth_handler)
+    opener = urllib.request.build_opener(proxy_handler, auth_handler, *extra_handlers)
     opener.addheaders = [("User-Agent", user_agent)]
     return opener
 

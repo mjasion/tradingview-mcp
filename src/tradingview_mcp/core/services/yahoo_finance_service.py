@@ -205,7 +205,14 @@ def _bootstrap_crumb() -> tuple[str, str]:
     """
     import http.cookiejar
     jar = http.cookiejar.CookieJar()
-    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
+    # Route bootstrap through the Webshare proxy too. Without this, the crumb
+    # session is anchored to the container's outbound IP — and that's exactly
+    # the IP Yahoo blacklisted, so every subsequent quoteSummary 429s. Sharing
+    # the proxy means the bootstrap, the crumb, and the quoteSummary call all
+    # originate from the same rotating proxy egress.
+    opener = build_opener_with_proxy(
+        _BROWSER_UA, extra_handlers=(urllib.request.HTTPCookieProcessor(jar),)
+    )
     opener.addheaders = [
         ("User-Agent", _BROWSER_UA),
         ("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"),
@@ -242,7 +249,11 @@ def _fetch_quote_summary(symbol: str, modules: list[str]) -> dict:
             "Accept-Language": "en-US,en;q=0.9",
             "Cookie": cookie_header,
         })
-        with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:
+        # Go through the Webshare proxy — the chart endpoint already does
+        # this and stays healthy; quoteSummary was the only Yahoo path
+        # still leaking the container's outbound IP and getting 429'd.
+        opener = build_opener_with_proxy(_BROWSER_UA)
+        with opener.open(req, timeout=_TIMEOUT) as resp:
             return json.loads(resp.read().decode("utf-8"))
 
     _log.info("asking Yahoo Finance about %s (%s)", symbol.upper(), ", ".join(modules))
