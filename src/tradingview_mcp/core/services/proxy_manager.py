@@ -74,32 +74,61 @@ def get_proxy() -> Optional[dict]:
     return {"http": url, "https": url}
 
 
+def _extra_proxy_urls() -> list:
+    """Parse ``PROXY_EXTRA_URLS`` — a comma-separated list of full proxy URLs.
+
+    These are fixed, self-hosted forward proxies (e.g. one per Oracle/k3s
+    node) that join the rotation alongside the Webshare gateway. Each URL is
+    ``http://[user:pass@]host:port`` and counts as one egress slot. Whitespace
+    and empty entries are ignored.
+    """
+    raw = os.environ.get("PROXY_EXTRA_URLS", "")
+    return [u.strip() for u in raw.split(",") if u.strip()]
+
+
 def _select_opener_egress() -> Optional[str]:
     """Pick the egress for a single outbound request.
 
     Returns a proxy URL, or ``None`` meaning "go direct on the host's own IP".
 
-    Normally this rolls a random sticky session in ``[min, max]``. When
-    ``PROXY_INCLUDE_DIRECT`` is set, the host's own (direct) connection joins
-    the rotation as one extra slot beyond ``max`` — so, e.g., 10 Webshare
-    sticky sessions + the home IP = 11 egresses sharing the load roughly
-    evenly. The home IP is residential, which Yahoo tolerates better than the
-    free-tier datacenter proxies, so it's a useful extra egress (not merely a
-    fallback). Returns ``None`` when no proxy is configured (graceful direct).
+    The rotation pool is a flat, per-IP-fair list of slots drawn from three
+    sources, all optional:
+
+    * **Webshare sticky sessions** — one slot per session id in ``[min, max]``
+      (each maps to ~one egress IP on Webshare's gateway). Requires the
+      ``PROXY_USERNAME_PREFIX`` / ``PROXY_PASSWORD`` creds.
+    * **Extra fixed proxies** (``PROXY_EXTRA_URLS``) — one slot per URL, e.g.
+      self-hosted forward proxies on your own VPS/k3s nodes.
+    * **Direct/home** — one slot when ``PROXY_INCLUDE_DIRECT`` is set; the
+      host's own (often residential) IP, which Yahoo tends to trust more than
+      datacenter proxy ranges.
+
+    A request is assigned uniformly across all slots, so e.g. 10 Webshare
+    sessions + 4 node proxies + home = 15 egresses at ~1/15 each. Returns
+    ``None`` (graceful direct) when the pool is empty or the proxy is disabled.
     """
-    if not is_proxy_configured():
-        return None
     c = _cfg()
-    lo, hi = c["min"], c["max"]
-    if c["include_direct"]:
-        # One slot past [lo, hi] represents the direct/home egress.
-        pick = random.randint(lo, hi + 1)
-        if pick > hi:
-            return None  # direct / home IP
-        session_id = pick
-    else:
-        session_id = random.randint(lo, hi)
-    return f"http://{c['prefix']}-{session_id}:{c['password']}@{c['host']}:{c['port']}"
+    if not c["enabled"]:
+        return None
+
+    has_webshare = bool(c["prefix"]) and bool(c["password"])
+    n_sessions = max(0, c["max"] - c["min"] + 1) if has_webshare else 0
+    extras = _extra_proxy_urls()
+    n_extra = len(extras)
+    n_direct = 1 if c["include_direct"] else 0
+
+    total = n_sessions + n_extra + n_direct
+    if total == 0:
+        return None
+
+    pick = random.randint(0, total - 1)
+    if pick < n_sessions:
+        session_id = c["min"] + pick
+        return f"http://{c['prefix']}-{session_id}:{c['password']}@{c['host']}:{c['port']}"
+    pick -= n_sessions
+    if pick < n_extra:
+        return extras[pick]
+    return None  # direct / home slot
 
 
 def build_opener_with_proxy(
@@ -117,11 +146,11 @@ def build_opener_with_proxy(
     proxy entirely — that's what put Yahoo's quoteSummary endpoint into a
     permanent 429 on the container's outbound IP.
 
-    The egress is chosen per call by :func:`_select_opener_egress`: a proxy
-    sticky session, or — when ``PROXY_INCLUDE_DIRECT`` is set — occasionally
-    the host's own direct connection as one extra rotation slot. A ``None``
-    egress (unconfigured, or the direct slot) yields a plain opener that still
-    carries any ``extra_handlers``.
+    The egress is chosen per call by :func:`_select_opener_egress`: a Webshare
+    sticky session, a fixed extra proxy (``PROXY_EXTRA_URLS``), or — when
+    ``PROXY_INCLUDE_DIRECT`` is set — the host's own direct connection. A
+    ``None`` egress (empty pool or the direct slot) yields a plain opener that
+    still carries any ``extra_handlers``.
     """
     proxy_url = _select_opener_egress()
     if proxy_url is None:
@@ -129,16 +158,21 @@ def build_opener_with_proxy(
         opener.addheaders = [("User-Agent", user_agent)]
         return opener
 
-    c = _cfg()
-    # Extract username from the full url for auth handler
-    username = proxy_url.split("//")[1].split(":")[0]
+    # Derive auth from the chosen URL itself (http://[user:pass@]host:port) so
+    # self-hosted proxies authenticate with their own creds, not Webshare's.
+    # A urllib ProxyHandler already replays embedded user:pass as a
+    # Proxy-Authorization header; the explicit ProxyBasicAuthHandler also
+    # answers 407 challenges. Proxies without creds skip the auth handler.
+    netloc = proxy_url.split("//", 1)[1]
+    handlers = [urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url})]
+    if "@" in netloc:
+        userinfo, hostport = netloc.rsplit("@", 1)
+        username, _, password = userinfo.partition(":")
+        pwd_mgr = urllib.request.HTTPPasswordMgrWithDefaultRealm()
+        pwd_mgr.add_password(None, f"http://{hostport}", username, password)
+        handlers.append(urllib.request.ProxyBasicAuthHandler(pwd_mgr))
 
-    proxy_handler = urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url})
-    pwd_mgr = urllib.request.HTTPPasswordMgrWithDefaultRealm()
-    pwd_mgr.add_password(None, f"http://{c['host']}:{c['port']}", username, c["password"])
-    auth_handler = urllib.request.ProxyBasicAuthHandler(pwd_mgr)
-
-    opener = urllib.request.build_opener(proxy_handler, auth_handler, *extra_handlers)
+    opener = urllib.request.build_opener(*handlers, *extra_handlers)
     opener.addheaders = [("User-Agent", user_agent)]
     return opener
 
