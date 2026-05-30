@@ -45,6 +45,9 @@ def _cfg() -> dict:
         "enabled": os.environ.get("PROXY_ENABLED", "true").lower() == "true",
         "min":     int(os.environ.get("PROXY_SESSION_MIN", "1")),
         "max":     int(os.environ.get("PROXY_SESSION_MAX", "250")),
+        # When true, the host's own (direct) connection joins the rotation as
+        # one extra egress alongside the proxy sticky sessions.
+        "include_direct": os.environ.get("PROXY_INCLUDE_DIRECT", "false").lower() == "true",
     }
 
 
@@ -71,6 +74,34 @@ def get_proxy() -> Optional[dict]:
     return {"http": url, "https": url}
 
 
+def _select_opener_egress() -> Optional[str]:
+    """Pick the egress for a single outbound request.
+
+    Returns a proxy URL, or ``None`` meaning "go direct on the host's own IP".
+
+    Normally this rolls a random sticky session in ``[min, max]``. When
+    ``PROXY_INCLUDE_DIRECT`` is set, the host's own (direct) connection joins
+    the rotation as one extra slot beyond ``max`` — so, e.g., 10 Webshare
+    sticky sessions + the home IP = 11 egresses sharing the load roughly
+    evenly. The home IP is residential, which Yahoo tolerates better than the
+    free-tier datacenter proxies, so it's a useful extra egress (not merely a
+    fallback). Returns ``None`` when no proxy is configured (graceful direct).
+    """
+    if not is_proxy_configured():
+        return None
+    c = _cfg()
+    lo, hi = c["min"], c["max"]
+    if c["include_direct"]:
+        # One slot past [lo, hi] represents the direct/home egress.
+        pick = random.randint(lo, hi + 1)
+        if pick > hi:
+            return None  # direct / home IP
+        session_id = pick
+    else:
+        session_id = random.randint(lo, hi)
+    return f"http://{c['prefix']}-{session_id}:{c['password']}@{c['host']}:{c['port']}"
+
+
 def build_opener_with_proxy(
     user_agent: str = "tradingview-mcp/0.5.0",
     *,
@@ -85,13 +116,19 @@ def build_opener_with_proxy(
     opener. Without this, callers that built their own opener bypassed the
     proxy entirely — that's what put Yahoo's quoteSummary endpoint into a
     permanent 429 on the container's outbound IP.
+
+    The egress is chosen per call by :func:`_select_opener_egress`: a proxy
+    sticky session, or — when ``PROXY_INCLUDE_DIRECT`` is set — occasionally
+    the host's own direct connection as one extra rotation slot. A ``None``
+    egress (unconfigured, or the direct slot) yields a plain opener that still
+    carries any ``extra_handlers``.
     """
-    if not is_proxy_configured():
+    proxy_url = _select_opener_egress()
+    if proxy_url is None:
         opener = urllib.request.build_opener(*extra_handlers)
         opener.addheaders = [("User-Agent", user_agent)]
         return opener
 
-    proxy_url = get_proxy_url()
     c = _cfg()
     # Extract username from the full url for auth handler
     username = proxy_url.split("//")[1].split(":")[0]

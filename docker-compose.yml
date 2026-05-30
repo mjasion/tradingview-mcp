@@ -13,6 +13,14 @@ services:
       # Without this the JSON cache lives only inside the container's writable
       # layer and is wiped by `docker compose down`.
       - TRADINGVIEW_MCP_CACHE_DIR=/var/cache/tradingview-mcp
+    # Webshare proxy credentials (PROXY_USERNAME_PREFIX / PROXY_PASSWORD, etc.)
+    # live in .env (gitignored — see .env.example). required: false keeps the
+    # stack booting proxy-less until you create .env. Without this block the
+    # container never sees PROXY_* and every Yahoo call egresses on the host IP
+    # — exactly the IP Yahoo 429-bans.
+    env_file:
+      - path: .env
+        required: true
     volumes:
       - cache:/var/cache/tradingview-mcp
     labels:
