@@ -1,0 +1,111 @@
+# =============================================================================
+# Self-hosted egress proxy for tradingview-mcp (PROXY_EXTRA_URLS)
+# =============================================================================
+# Runs a tinyproxy forward proxy on EVERY k3s node (DaemonSet) and exposes it
+# as a NodePort with externalTrafficPolicy: Local. Because a pod's outbound
+# traffic egresses on its node's public IP, hitting <nodeN-public-ip>:30888
+# makes Yahoo see node N's IP — giving you one distinct egress per node.
+#
+# Wire it into tradingview-mcp's .env (one URL per node):
+#   PROXY_EXTRA_URLS=http://proxyuser:CHANGEME@<node1-ip>:30888,http://proxyuser:CHANGEME@<node2-ip>:30888,...
+#
+# SECURITY — this is internet-facing. Two layers required:
+#   1. BasicAuth below (change the password!).
+#   2. Oracle Cloud "Security List"/NSG ingress rule for TCP 30888 restricted
+#      to your MCP host's IP ONLY — plus the instance's local firewall
+#      (Oracle Linux ships a restrictive iptables INPUT chain):
+#        sudo iptables -I INPUT -p tcp --dport 30888 -s <mcp-host-ip> -j ACCEPT
+#      For zero public exposure, skip the NodePort and run this behind
+#      Tailscale/WireGuard instead, then point PROXY_EXTRA_URLS at the
+#      tailnet IPs (drop BasicAuth, it's a private network).
+#
+# Apply:  kubectl apply -f deploy/k3s-egress-proxy.yaml
+# =============================================================================
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: egress-proxy
+---
+# tinyproxy config carries the BasicAuth password, so keep it in a Secret.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: tinyproxy-config
+  namespace: egress-proxy
+stringData:
+  tinyproxy.conf: |
+    User nobody
+    Group nogroup
+    Port 8888
+    Listen 0.0.0.0
+    Timeout 600
+    MaxClients 100
+    # Rely on BasicAuth + the Oracle/iptables firewall, not source-IP allowlists.
+    Allow 0.0.0.0/0
+    BasicAuth proxyuser CHANGEME
+    # CONNECT is required for HTTPS (Yahoo, etc.).
+    ConnectPort 443
+    ConnectPort 563
+    DisableViaHeader Yes
+    LogLevel Warning
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: egress-proxy
+  namespace: egress-proxy
+  labels:
+    app: egress-proxy
+spec:
+  selector:
+    matchLabels:
+      app: egress-proxy
+  template:
+    metadata:
+      labels:
+        app: egress-proxy
+    spec:
+      containers:
+        - name: tinyproxy
+          image: vimagick/tinyproxy:latest  # pin a digest in production
+          ports:
+            - containerPort: 8888
+              name: proxy
+          volumeMounts:
+            - name: config
+              mountPath: /etc/tinyproxy
+              readOnly: true
+          readinessProbe:
+            tcpSocket:
+              port: 8888
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 200m
+              memory: 64Mi
+      volumes:
+        - name: config
+          secret:
+            secretName: tinyproxy-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: egress-proxy
+  namespace: egress-proxy
+spec:
+  type: NodePort
+  # Local keeps a request to nodeN:30888 on nodeN's pod, so the egress IP
+  # matches the node you addressed (deterministic per-node egress).
+  externalTrafficPolicy: Local
+  selector:
+    app: egress-proxy
+  ports:
+    - name: proxy
+      port: 8888
+      targetPort: 8888
+      nodePort: 30888
