@@ -177,34 +177,299 @@ def build_opener_with_proxy(
     return opener
 
 
-def check_proxy() -> dict:
-    """Test proxy connectivity. Returns current exit IP, country, city."""
+# Cap on how many Webshare sessions check_proxy() probes, so the diagnostic
+# stays fast even when PROXY_SESSION_MAX is large.
+_CHECK_PROXY_SESSION_CAP = 16
+
+
+def _probe_egress(proxy_url: Optional[str], timeout: int = 8) -> dict:
+    """Hit ipinfo.io through one egress (proxy URL, or None = direct).
+
+    Mirrors build_opener_with_proxy's auth handling so the probe matches how
+    real traffic authenticates. Returns ok/ip/country/city/error.
+    """
     import json
-
-    status: dict = {
-        "configured": is_proxy_configured(),
-        "ok": False,
-        "ip": None, "country": None, "city": None, "error": None,
-    }
-
-    if not is_proxy_configured():
-        status["error"] = (
-            "Proxy not configured. Set PROXY_HOST, PROXY_USERNAME_PREFIX, "
-            "PROXY_PASSWORD in your environment or .env file."
-        )
-        return status
-
+    out = {"ok": False, "ip": None, "country": None, "city": None, "org": None, "error": None}
     try:
-        proxy_url = get_proxy_url()
-        handler = urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url})
-        opener  = urllib.request.build_opener(handler)
+        if proxy_url is None:
+            opener = urllib.request.build_opener()
+        else:
+            netloc = proxy_url.split("//", 1)[1]
+            handlers = [urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url})]
+            if "@" in netloc:
+                userinfo, hostport = netloc.rsplit("@", 1)
+                username, _, password = userinfo.partition(":")
+                pwd_mgr = urllib.request.HTTPPasswordMgrWithDefaultRealm()
+                pwd_mgr.add_password(None, f"http://{hostport}", username, password)
+                handlers.append(urllib.request.ProxyBasicAuthHandler(pwd_mgr))
+            opener = urllib.request.build_opener(*handlers)
         opener.addheaders = [("User-Agent", "tradingview-mcp/0.5.0")]
-        req = urllib.request.Request("https://ipinfo.io/json")
-        with opener.open(req, timeout=12) as resp:
+        with opener.open("https://ipinfo.io/json", timeout=timeout) as resp:
             data = json.loads(resp.read())
-        status.update(ip=data.get("ip"), country=data.get("country"),
-                      city=data.get("city"), ok=True)
+        out.update(ok=True, ip=data.get("ip"), country=data.get("country"),
+                   city=data.get("city"), org=data.get("org"))
     except Exception as e:
-        status["error"] = str(e)
+        out["error"] = str(e)
+    return out
 
-    return status
+
+_NO_EGRESS_NOTE = ("No egresses configured — set PROXY_USERNAME_PREFIX/"
+                   "PROXY_PASSWORD, PROXY_EXTRA_URLS, or PROXY_INCLUDE_DIRECT.")
+
+
+def build_egress_jobs() -> tuple:
+    """Return ``(jobs, note)`` describing the whole rotation pool.
+
+    ``jobs`` is an ordered list of ``(label, url_or_None)`` — Webshare sticky
+    sessions first (capped at ``_CHECK_PROXY_SESSION_CAP``), then every
+    ``PROXY_EXTRA_URLS`` proxy, then the direct/home slot when enabled. A
+    ``url`` of ``None`` means the direct/home egress. ``note`` flags Webshare
+    sessions skipped by the cap (or ``None``). Returns ``([], None)`` when the
+    proxy is disabled or nothing is configured — the single source of truth for
+    both :func:`check_proxy` and :func:`run_check_proxy`.
+    """
+    c = _cfg()
+    if not c["enabled"]:
+        return [], None
+
+    jobs: list = []
+    note = None
+    if bool(c["prefix"]) and bool(c["password"]):
+        hi = min(c["max"], c["min"] + _CHECK_PROXY_SESSION_CAP - 1)
+        if hi < c["max"]:
+            note = f"webshare sessions {hi + 1}..{c['max']} not probed (cap)"
+        for sid in range(c["min"], hi + 1):
+            url = f"http://{c['prefix']}-{sid}:{c['password']}@{c['host']}:{c['port']}"
+            jobs.append((f"webshare#{sid}", url))
+
+    for url in _extra_proxy_urls():
+        jobs.append(("extra:" + url.split("@")[-1], url))
+
+    if c["include_direct"]:
+        jobs.append(("direct/home", None))
+
+    return jobs, note
+
+
+def check_proxy(*, max_workers: int = 8) -> dict:
+    """Probe EVERY egress in the rotation pool (in parallel) and report each
+    exit IP.
+
+    Tests the Webshare sticky sessions (capped at ``_CHECK_PROXY_SESSION_CAP``),
+    every ``PROXY_EXTRA_URLS`` proxy, and the direct/home slot when enabled —
+    so a too-wide ``PROXY_SESSION_MAX`` (sessions beyond your plan size → 407)
+    or a dead self-hosted proxy shows up per-egress instead of hiding behind a
+    single random sample (the old behaviour only tested one Webshare session).
+
+    Egress order is preserved in ``egresses`` even though probing is concurrent.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    c = _cfg()
+    if not c["enabled"]:
+        return {"enabled": False, "ok_count": 0, "total": 0, "egresses": [],
+                "note": "PROXY_ENABLED is not 'true'."}
+
+    jobs, note = build_egress_jobs()
+    egresses: list = [None] * len(jobs)
+
+    def _work(i: int):
+        label, url = jobs[i]
+        r = _probe_egress(url)
+        r["label"] = label
+        return i, r
+
+    if jobs:
+        with ThreadPoolExecutor(max_workers=min(max_workers, len(jobs))) as ex:
+            for i, r in ex.map(_work, range(len(jobs))):
+                egresses[i] = r
+
+    result = {
+        "enabled": True,
+        "ok_count": sum(1 for e in egresses if e["ok"]),
+        "total": len(egresses),
+        "egresses": egresses,
+    }
+    if not egresses:
+        result["note"] = _NO_EGRESS_NOTE
+    elif note:
+        result["note"] = note
+    return result
+
+
+def format_proxy_report(result: dict) -> str:
+    """Render :func:`check_proxy` output as an aligned, human-readable report.
+
+    Kept here (not in server.py) so the CLI stays thin and the formatting is
+    unit-testable without capturing stdout.
+    """
+    if not result.get("enabled", False):
+        return result.get("note", "Proxy disabled (PROXY_ENABLED is not 'true').")
+
+    egresses = result.get("egresses", [])
+    lines = [f"Proxy egress check — {result.get('ok_count', 0)}/{result.get('total', 0)} OK"]
+    if not egresses:
+        lines.append("  " + result.get("note", "No egresses configured."))
+        return "\n".join(lines)
+
+    label_w = max((len(e.get("label") or "") for e in egresses), default=0)
+    lines.append("")
+    for e in egresses:
+        glyph = "✓" if e.get("ok") else "✗"
+        label = (e.get("label") or "").ljust(label_w)
+        if e.get("ok"):
+            loc = " ".join(x for x in (e.get("country"), e.get("city")) if x)
+            row = f"  {glyph} {label}  {(e.get('ip') or '?'):<15}  {loc}"
+            if e.get("org"):
+                row += f"  {e['org']}"
+            lines.append(row.rstrip())
+        else:
+            lines.append(f"  {glyph} {label}  error: {e.get('error')}")
+    if result.get("note"):
+        lines.append("")
+        lines.append(f"note: {result['note']}")
+    return "\n".join(lines)
+
+
+def run_check_proxy(out, *, is_tty: bool = False, max_workers: int = 8) -> dict:
+    """Probe every egress with live progress, returning the same dict as
+    :func:`check_proxy`.
+
+    ``is_tty`` picks the renderer:
+
+    * **terminal** — a cursor-addressed board that shows every egress as
+      ``queued`` → ``checking…`` (animated spinner) → ``✓``/``✗``, with a
+      ``done k/N`` header that ticks up as probes resolve.
+    * **piped/redirected** — plain ``[k/N] [OK|FAIL] label …`` lines streamed
+      as each probe finishes, then a one-line summary. No ANSI, so logs and
+      ``docker compose exec -T`` stay clean.
+
+    ``out`` is the stream to write to (a param so tests can pass a StringIO).
+    Probing is concurrent (``max_workers``); with more egresses than workers the
+    board genuinely shows some ``queued`` while others are ``checking``.
+    """
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    c = _cfg()
+    if not c["enabled"]:
+        result = {"enabled": False, "ok_count": 0, "total": 0, "egresses": [],
+                  "note": "PROXY_ENABLED is not 'true'."}
+        out.write(format_proxy_report(result) + "\n")
+        out.flush()
+        return result
+
+    jobs, note = build_egress_jobs()
+    if not jobs:
+        result = {"enabled": True, "ok_count": 0, "total": 0, "egresses": [],
+                  "note": _NO_EGRESS_NOTE}
+        out.write(format_proxy_report(result) + "\n")
+        out.flush()
+        return result
+
+    n = len(jobs)
+    label_w = max(len(label) for label, _ in jobs)
+    statuses: list = ["queued"] * n          # "queued" | "checking" | result-dict
+    spin = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+    spin_idx = [0]
+    lock = threading.Lock()
+
+    GREEN, RED, DIM, RST = (
+        ("\x1b[32m", "\x1b[31m", "\x1b[2m", "\x1b[0m") if is_tty else ("", "", "", "")
+    )
+
+    def _done() -> int:
+        return sum(1 for s in statuses if isinstance(s, dict))
+
+    def _ok() -> int:
+        return sum(1 for s in statuses if isinstance(s, dict) and s["ok"])
+
+    def _line(i: int) -> str:
+        label = jobs[i][0].ljust(label_w)
+        st = statuses[i]
+        if st == "queued":
+            return f"  {DIM}·  {label}  queued{RST}"
+        if st == "checking":
+            return f"  {spin[spin_idx[0] % len(spin)]}  {label}  checking…"
+        if st["ok"]:
+            loc = " ".join(x for x in (st.get("country"), st.get("city")) if x)
+            row = f"  {GREEN}✓{RST}  {label}  {(st.get('ip') or '?'):<15}  {loc}"
+            if st.get("org"):
+                row += f"  {DIM}{st['org']}{RST}"
+            return row
+        return f"  {RED}✗  {label}  error: {st.get('error')}{RST}"
+
+    def _render(first: bool = False) -> None:
+        body = [f"Proxy egress check — {_done()}/{n} done, {_ok()} OK"]
+        body += [_line(i) for i in range(n)]
+        if first:
+            out.write("\n".join(body) + "\n")
+        else:
+            out.write(f"\x1b[{n + 1}A")  # cursor up to the header line
+            out.write("\n".join("\x1b[2K" + ln for ln in body) + "\n")
+        out.flush()
+
+    def _work(i: int):
+        with lock:
+            statuses[i] = "checking"
+            if is_tty:
+                _render()
+        r = _probe_egress(jobs[i][1])
+        r["label"] = jobs[i][0]
+        with lock:
+            statuses[i] = r
+            if is_tty:
+                _render()
+            else:
+                tag = "OK  " if r["ok"] else "FAIL"
+                if r["ok"]:
+                    loc = " ".join(x for x in (r.get("country"), r.get("city")) if x)
+                    detail = f"{r.get('ip')}  {loc}"
+                    if r.get("org"):
+                        detail += f"  {r['org']}"
+                else:
+                    detail = f"error: {r.get('error')}"
+                out.write(f"  [{_done()}/{n}] [{tag}] {jobs[i][0]}  {detail}\n")
+                out.flush()
+        return i
+
+    ticker = None
+    stop = None
+    if is_tty:
+        out.write(f"{DIM}Probing {n} egress(es) via ipinfo.io…{RST}\n")
+        _render(first=True)
+        stop = threading.Event()
+
+        def _tick() -> None:
+            while not stop.wait(0.12):
+                with lock:
+                    spin_idx[0] += 1
+                    _render()
+
+        ticker = threading.Thread(target=_tick, daemon=True)
+        ticker.start()
+    else:
+        out.write(f"Probing {n} egress(es) via ipinfo.io…\n")
+        out.flush()
+
+    with ThreadPoolExecutor(max_workers=min(max_workers, n)) as ex:
+        list(ex.map(_work, range(n)))
+
+    if is_tty:
+        stop.set()
+        ticker.join(timeout=0.5)
+        with lock:
+            _render()  # final frame: everything resolved
+
+    egresses = [statuses[i] for i in range(n)]
+    result = {"enabled": True,
+              "ok_count": sum(1 for e in egresses if e["ok"]),
+              "total": n, "egresses": egresses}
+    if note:
+        result["note"] = note
+    if not is_tty:
+        out.write(f"\nProxy egress check — {result['ok_count']}/{n} OK\n")
+    if note:
+        out.write(f"{DIM}note: {note}{RST}\n" if is_tty else f"note: {note}\n")
+    out.flush()
+    return result

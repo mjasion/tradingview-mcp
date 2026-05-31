@@ -67,13 +67,25 @@ spec:
     spec:
       containers:
         - name: tinyproxy
-          image: vimagick/tinyproxy:latest  # pin a digest in production
+          # Oracle Ampere A1 nodes are arm64 — vimagick/tinyproxy ships no arm64
+          # build, hence "exec format error". The official alpine image IS
+          # multi-arch (amd64/arm64) and carries tinyproxy in its community
+          # repo, so we install + run it at start (needs node internet, which a
+          # proxy has by definition). For a cleaner setup, build a small
+          # multi-arch image (FROM alpine; RUN apk add tinyproxy) and push it to
+          # a registry your cluster can pull, then drop the command/args below.
+          image: alpine:3.20
+          command: ["/bin/sh", "-c"]
+          args:
+            - apk add --no-cache tinyproxy && exec tinyproxy -d -c /etc/tinyproxy.d/tinyproxy.conf
           ports:
             - containerPort: 8888
               name: proxy
           volumeMounts:
             - name: config
-              mountPath: /etc/tinyproxy
+              # NOT /etc/tinyproxy: apk installs the package's default config
+              # there, and a read-only secret mount would block the install.
+              mountPath: /etc/tinyproxy.d
               readOnly: true
           readinessProbe:
             tcpSocket:

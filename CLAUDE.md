@@ -80,6 +80,7 @@ tests/unit/                            # pytest, all fast (no network)
 ```bash
 uv run tradingview-mcp                                 # streamable-http on :8000
 uv run tradingview-mcp stdio                           # for Claude Desktop / similar
+uv run tradingview-mcp check-proxy                     # probe every egress via ipinfo.io (live board on a tty, streamed lines when piped); --json for raw
 TRADINGVIEW_MCP_LOG_LEVEL=DEBUG uv run tradingview-mcp # verbose logs to stderr
 uv run pytest -q                                       # tests, ~50ms, no network
 docker compose up -d                                   # full stack with autoheal sidecar

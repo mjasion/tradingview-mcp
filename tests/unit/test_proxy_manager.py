@@ -12,6 +12,7 @@ monkeypatched per test to pin which slot is chosen.
 """
 from __future__ import annotations
 
+import io
 import urllib.request
 
 import pytest
@@ -151,3 +152,144 @@ def test_build_opener_extra_proxy_without_auth(proxy_env, monkeypatch):
     opener = pm.build_opener_with_proxy()
     assert not _has_proxy_auth(opener)  # no creds → no auth handler
     assert _proxy_map(opener)["http"] == "http://oracle-private:8888"
+
+
+# ── format_proxy_report (CLI presentation) ────────────────────────────────────
+
+
+def test_format_report_disabled_shows_note():
+    out = pm.format_proxy_report({"enabled": False, "note": "PROXY_ENABLED is not 'true'."})
+    assert out == "PROXY_ENABLED is not 'true'."
+
+
+def test_format_report_lists_each_egress_with_status():
+    result = {
+        "enabled": True,
+        "ok_count": 1,
+        "total": 2,
+        "egresses": [
+            {"ok": True, "ip": "1.2.3.4", "country": "PL", "city": "Warsaw",
+             "org": "AS8819 Metro Internet", "error": None, "label": "direct/home"},
+            {"ok": False, "ip": None, "country": None, "city": None,
+             "org": None, "error": "boom", "label": "webshare#1"},
+        ],
+    }
+    out = pm.format_proxy_report(result)
+    assert "1/2 OK" in out
+    assert "✓ direct/home" in out
+    assert "1.2.3.4" in out and "PL Warsaw" in out
+    assert "AS8819 Metro Internet" in out  # organization surfaced
+    assert "✗ webshare#1" in out
+    assert "error: boom" in out
+
+
+def test_format_report_surfaces_note_for_session_cap():
+    result = {
+        "enabled": True, "ok_count": 1, "total": 1,
+        "egresses": [{"ok": True, "ip": "9.9.9.9", "country": None, "city": None,
+                      "error": None, "label": "webshare#1"}],
+        "note": "webshare sessions 17..250 not probed (cap)",
+    }
+    out = pm.format_proxy_report(result)
+    assert "note: webshare sessions 17..250 not probed (cap)" in out
+
+
+def test_format_report_empty_pool_shows_note():
+    out = pm.format_proxy_report(
+        {"enabled": True, "ok_count": 0, "total": 0, "egresses": [],
+         "note": "No egresses configured."}
+    )
+    assert "0/0 OK" in out
+    assert "No egresses configured." in out
+
+
+# ── build_egress_jobs (the rotation pool, as an ordered work-list) ────────────
+
+
+def test_build_egress_jobs_orders_the_whole_pool(proxy_env):
+    proxy_env.setenv("PROXY_SESSION_MAX", "3")
+    proxy_env.setenv("PROXY_EXTRA_URLS", "http://u:p@oracle1:8888")
+    proxy_env.setenv("PROXY_INCLUDE_DIRECT", "true")
+    jobs, note = pm.build_egress_jobs()
+    assert [label for label, _ in jobs] == [
+        "webshare#1", "webshare#2", "webshare#3", "extra:oracle1:8888", "direct/home",
+    ]
+    assert jobs[-1][1] is None  # direct slot carries a None url
+    assert note is None
+
+
+def test_build_egress_jobs_caps_webshare_and_notes_the_rest(proxy_env):
+    proxy_env.setenv("PROXY_SESSION_MAX", "50")
+    jobs, note = pm.build_egress_jobs()
+    assert len(jobs) == pm._CHECK_PROXY_SESSION_CAP  # 16
+    assert note == "webshare sessions 17..50 not probed (cap)"
+
+
+def test_build_egress_jobs_empty_when_disabled(proxy_env):
+    proxy_env.setenv("PROXY_ENABLED", "false")
+    assert pm.build_egress_jobs() == ([], None)
+
+
+# ── check_proxy / run_check_proxy (probe orchestration, no network) ───────────
+
+
+def _fake_probe(url, timeout=8):
+    """Deterministic stand-in for _probe_egress — no sockets, dead LAN proxy."""
+    if url is None:
+        return {"ok": True, "ip": "83.1.1.1", "country": "PL", "city": "Warsaw",
+                "org": "AS8819 Metro Internet", "error": None}
+    if "oracle-dead" in url:
+        return {"ok": False, "ip": None, "country": None, "city": None,
+                "org": None, "error": "No route to host"}
+    return {"ok": True, "ip": "64.0.0.1", "country": "DE", "city": "Frankfurt",
+            "org": "AS212238 Datacamp", "error": None}
+
+
+def test_check_proxy_probes_every_egress_in_order(proxy_env, monkeypatch):
+    proxy_env.setenv("PROXY_SESSION_MAX", "2")
+    proxy_env.setenv("PROXY_EXTRA_URLS", "http://u:p@oracle-dead:30888")
+    proxy_env.setenv("PROXY_INCLUDE_DIRECT", "true")
+    monkeypatch.setattr(pm, "_probe_egress", _fake_probe)
+    res = pm.check_proxy()
+    assert res["total"] == 4 and res["ok_count"] == 3  # 2 webshare + 1 dead extra + direct
+    # Order preserved despite concurrent probing.
+    assert [e["label"] for e in res["egresses"]] == [
+        "webshare#1", "webshare#2", "extra:oracle-dead:30888", "direct/home",
+    ]
+    dead = next(e for e in res["egresses"] if e["label"].startswith("extra:"))
+    assert dead["ok"] is False and "No route to host" in dead["error"]
+
+
+def test_run_check_proxy_non_tty_streams_each_and_summarizes(proxy_env, monkeypatch):
+    proxy_env.setenv("PROXY_SESSION_MAX", "1")
+    proxy_env.setenv("PROXY_INCLUDE_DIRECT", "true")
+    monkeypatch.setattr(pm, "_probe_egress", _fake_probe)
+    buf = io.StringIO()
+    res = pm.run_check_proxy(buf, is_tty=False)
+    out = buf.getvalue()
+    assert res["ok_count"] == 2 and res["total"] == 2
+    # Per-egress progress lines with the running [k/N] counter…
+    assert "[1/2]" in out and "[2/2]" in out
+    assert "webshare#1" in out and "direct/home" in out
+    assert "AS8819 Metro Internet" in out  # organization shown
+    # …a final summary…
+    assert "2/2 OK" in out
+    # …and NO terminal control codes when not a tty (clean logs / -T exec).
+    assert "\x1b[" not in out
+
+
+def test_run_check_proxy_disabled_reports_and_returns(monkeypatch):
+    monkeypatch.setenv("PROXY_ENABLED", "false")
+    buf = io.StringIO()
+    res = pm.run_check_proxy(buf, is_tty=False)
+    assert res["enabled"] is False
+    assert "PROXY_ENABLED" in buf.getvalue()
+
+
+def test_run_check_proxy_flags_session_cap_note(proxy_env, monkeypatch):
+    proxy_env.setenv("PROXY_SESSION_MAX", "50")
+    monkeypatch.setattr(pm, "_probe_egress", _fake_probe)
+    buf = io.StringIO()
+    res = pm.run_check_proxy(buf, is_tty=False)
+    assert res["total"] == pm._CHECK_PROXY_SESSION_CAP
+    assert "note: webshare sessions 17..50 not probed (cap)" in buf.getvalue()

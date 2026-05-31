@@ -917,14 +917,36 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="TradingView Screener MCP server")
     parser.add_argument(
         "transport",
-        choices=["stdio", "streamable-http"],
+        choices=["stdio", "streamable-http", "check-proxy"],
         default="stdio",
         nargs="?",
-        help="Transport (default stdio)",
+        help="Transport, or 'check-proxy' to probe every egress via ipinfo.io (default stdio)",
     )
     parser.add_argument("--host", default=os.environ.get("HOST", "127.0.0.1"))
     parser.add_argument("--port", type=int, default=int(os.environ.get("PORT", "8000")))
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="With check-proxy: print raw JSON instead of the table",
+    )
     args = parser.parse_args()
+
+    if args.transport == "check-proxy":
+        import json as _json
+        import sys
+        from tradingview_mcp.core.services import proxy_manager as _pm
+
+        if args.json:
+            result = _pm.check_proxy()
+            print(_json.dumps(result, indent=2, ensure_ascii=False))
+        else:
+            # Live progress board on a real terminal, streamed lines when piped.
+            result = _pm.run_check_proxy(sys.stdout, is_tty=sys.stdout.isatty())
+        # Non-zero exit when the proxy is enabled but every egress failed —
+        # lets `tradingview-mcp check-proxy` gate a health check in scripts/CI.
+        if result.get("enabled") and result.get("total", 0) > 0 and result.get("ok_count", 0) == 0:
+            sys.exit(1)
+        return
 
     if os.environ.get("DEBUG_MCP"):
         import sys
