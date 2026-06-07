@@ -27,6 +27,15 @@ COPY --from=builder /usr/local/bin/tradingview-mcp /usr/local/bin/tradingview-mc
 # Copy app source (needed for coinlist data files etc.)
 COPY --from=builder /app /app
 
+# Diagnostic tooling for egress/proxy debugging from inside the container.
+# The container has its own network namespace, so a proxy reachable from the
+# host (curl works there) can still be unreachable here — these let you tell
+# DNS failures (dig/nslookup) from routing failures (ip route get / ping) and
+# replay the exact proxy probe (curl -x …). See `tradingview-mcp check-proxy`.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        curl bind9-dnsutils iputils-ping iproute2 netcat-openbsd \
+    && rm -rf /var/lib/apt/lists/*
+
 # Create non-root user for security and pre-create the cache directory.
 # When docker-compose mounts a named volume here, Docker propagates these
 # permissions on first mount — without this mcpuser hits PermissionError.
