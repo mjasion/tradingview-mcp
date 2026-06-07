@@ -50,5 +50,18 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
 
+networks:
+  # Docker's default bridge pool (172.16.0.0/12) overlapped the IPsec/LAN
+  # subnet 172.20.0.0/16 where the self-hosted egress proxies live (e.g.
+  # oci2-local.mjasion.dev -> 172.20.1.37). A container at 172.20.0.x then
+  # treats 172.20.1.37 as on-link, ARPs for it on the docker bridge, and fails
+  # with "No route to host" — it never hands the packet to the host's IPsec
+  # tunnel. Pin the bridge to a subnet that can't overlap the tunnel. If
+  # 10.89.0.0/24 also collides with your LAN/VPN, pick any other free /24.
+  default:
+    ipam:
+      config:
+        - subnet: 10.89.0.0/24
+
 volumes:
   cache:
