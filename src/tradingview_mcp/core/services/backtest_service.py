@@ -21,6 +21,7 @@ import urllib.request
 from datetime import datetime, timezone
 from typing import Optional
 
+from tradingview_mcp.core.services.rate_limiter import gated_urlopen, RateLimitTimeout
 from tradingview_mcp.core.services.indicators_calc import (
     calc_rsi, calc_bollinger, calc_macd, calc_ema, calc_supertrend, calc_donchian,
 )
@@ -52,8 +53,10 @@ def _fetch_ohlcv(symbol: str, period: str, interval: str = "1d") -> list[dict]:
 
     data = None
     try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with gated_urlopen(req, timeout=15) as resp:
             data = json.loads(resp.read().decode("utf-8"))
+    except RateLimitTimeout:
+        raise  # shed by the queue → fail fast, don't fall through to the proxy retry
     except Exception:
         pass
 
@@ -63,6 +66,8 @@ def _fetch_ohlcv(symbol: str, period: str, interval: str = "1d") -> list[dict]:
             opener = build_opener_with_proxy(_UA)
             with opener.open(url, timeout=18) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
+        except RateLimitTimeout:
+            raise  # shed by the queue → fail fast, don't wrap as a fetch error
         except Exception as e:
             raise RuntimeError(f"Both direct and proxy connections failed: {e}")
 

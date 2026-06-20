@@ -21,6 +21,8 @@ import json
 import urllib.request
 import urllib.error
 
+from tradingview_mcp.core.services.rate_limiter import gated_urlopen
+
 _TIMEOUT = 10
 _UA = "tradingview-mcp/0.8.0"
 _GLOBAL_URL = "https://api.coingecko.com/api/v3/global"
@@ -33,7 +35,7 @@ _PRICE_URL = (
 
 def _http_get_json(url: str) -> dict:
     req = urllib.request.Request(url, headers={"User-Agent": _UA, "Accept": "application/json"})
-    with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:
+    with gated_urlopen(req, timeout=_TIMEOUT) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
 

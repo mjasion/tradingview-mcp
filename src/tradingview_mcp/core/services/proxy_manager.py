@@ -25,6 +25,8 @@ import random
 import urllib.request
 from typing import Optional
 
+from tradingview_mcp.core.services.rate_limiter import acquire as _rate_acquire
+
 # Try loading .env file if python-dotenv is available
 try:
     from dotenv import load_dotenv
@@ -131,6 +133,28 @@ def _select_opener_egress() -> Optional[str]:
     return None  # direct / home slot
 
 
+class _RateLimitHandler(urllib.request.BaseHandler):
+    """urllib request-processor that gates every open through the global limiter.
+
+    Installed on every opener built by :func:`build_opener_with_proxy`, so all
+    proxy-path traffic (Yahoo, Stooq, Reddit, PAP, beta-ETF, fallbacks…) is
+    throttled transparently — services don't need to know the limiter exists.
+    ``http_request``/``https_request`` run on each (re)open, so redirects and
+    proxy-auth retries each correctly take their own slot.
+
+    Diagnostics deliberately bypass this: ``_probe_egress`` (``check-proxy``)
+    builds its own opener, so the live egress board is never throttled.
+    """
+
+    handler_order = 100  # run before the network handlers
+
+    def http_request(self, req):
+        _rate_acquire(req.host)
+        return req
+
+    https_request = http_request
+
+
 def build_opener_with_proxy(
     user_agent: str = "tradingview-mcp/0.5.0",
     *,
@@ -154,7 +178,7 @@ def build_opener_with_proxy(
     """
     proxy_url = _select_opener_egress()
     if proxy_url is None:
-        opener = urllib.request.build_opener(*extra_handlers)
+        opener = urllib.request.build_opener(_RateLimitHandler(), *extra_handlers)
         opener.addheaders = [("User-Agent", user_agent)]
         return opener
 
@@ -164,7 +188,8 @@ def build_opener_with_proxy(
     # Proxy-Authorization header; the explicit ProxyBasicAuthHandler also
     # answers 407 challenges. Proxies without creds skip the auth handler.
     netloc = proxy_url.split("//", 1)[1]
-    handlers = [urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url})]
+    handlers = [_RateLimitHandler(),
+                urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url})]
     if "@" in netloc:
         userinfo, hostport = netloc.rsplit("@", 1)
         username, _, password = userinfo.partition(":")
@@ -187,6 +212,10 @@ def _probe_egress(proxy_url: Optional[str], timeout: int = 8) -> dict:
 
     Mirrors build_opener_with_proxy's auth handling so the probe matches how
     real traffic authenticates. Returns ok/ip/country/city/error.
+
+    Builds its openers directly (no _RateLimitHandler) on purpose: check-proxy
+    probes every egress concurrently and must not be throttled by the global
+    outbound rate limiter, or the live board would crawl.
     """
     import json
     out = {"ok": False, "ip": None, "country": None, "city": None, "org": None, "error": None}

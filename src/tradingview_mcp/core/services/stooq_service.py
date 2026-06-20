@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from tradingview_mcp.core.services.proxy_manager import build_opener_with_proxy
+from tradingview_mcp.core.services.rate_limiter import gated_urlopen, RateLimitTimeout
 
 _TIMEOUT = 10
 _UA = "tradingview-mcp/0.7.1"
@@ -58,8 +59,10 @@ def _fetch_csv(symbol: str) -> list[dict[str, str]]:
         opener = build_opener_with_proxy(_UA)
         with opener.open(req, timeout=_TIMEOUT) as resp:
             text = resp.read().decode("utf-8", errors="replace")
+    except RateLimitTimeout:
+        raise  # shed by the queue → fail fast, don't burn a second slot on fallback
     except Exception:
-        with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:
+        with gated_urlopen(req, timeout=_TIMEOUT) as resp:
             text = resp.read().decode("utf-8", errors="replace")
     return list(csv.DictReader(io.StringIO(text)))
 

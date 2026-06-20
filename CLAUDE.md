@@ -97,6 +97,29 @@ image pins it to `/var/cache/tradingview-mcp` on a named volume).
 Sandbox: `stooq.com` is on the allowed-host list. Other external HTTP
 hosts may need `dangerouslyDisableSandbox: true` for ad-hoc probes.
 
+## Outbound rate limiting
+
+`core/services/rate_limiter.py` is a process-global FIFO queue: at most one
+*external* HTTP request starts every `1/RPS` seconds (default 1/s), across all
+hosts, to stop upstreams blocking the egress. It's thread-safe (FastMCP runs
+each sync tool in its own worker thread) and applied at the four outbound
+chokepoints — so new network code is throttled automatically if it uses them:
+
+- the proxy opener: a `_RateLimitHandler` on every `build_opener_with_proxy()`
+  opener (Yahoo, Stooq, Reddit, PAP, beta-ETF, fallbacks)
+- direct fetches: `rate_limiter.gated_urlopen()` (sec, bitcoin, yahoo/stooq
+  fallbacks, backtest, pap fallback) — use this, not `urllib.request.urlopen`
+- `tradingview_ta`: one `acquire()` in `tv_scanner._do_call` (cache miss only)
+- `tradingview_screener` + `feedparser`: an `acquire()` before each call site
+
+Config (env): `TRADINGVIEW_MCP_RATE_LIMIT_ENABLED` (default true),
+`_RPS` (default 1.0; ≤0 disables), `_MAX_WAIT` (default 30s; a caller that would
+queue longer than this raises `RateLimitTimeout` instead of hanging past the MCP
+client's tool timeout), `_BACKEND` (`memory`; `redis` reserved for multi-replica,
+falls back to memory). `check-proxy` deliberately bypasses the limiter. Tests
+disable the global limiter via `tests/unit/conftest.py`; the limiter's own
+behaviour is covered with injected instances in `test_rate_limiter.py`.
+
 ## Tests
 
 - All fast, no network. If a test requires HTTP, it's wrong — mock or move to

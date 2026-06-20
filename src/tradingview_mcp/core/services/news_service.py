@@ -16,6 +16,7 @@ from email.utils import parsedate_to_datetime
 from typing import Optional
 
 from tradingview_mcp.core.services.log import get_logger
+from tradingview_mcp.core.services.rate_limiter import acquire as _rate_acquire
 
 # feedparser is bundled with agent-reach (installed globally)
 try:
@@ -134,6 +135,7 @@ def fetch_news(
             break
         try:
             _log.debug("fetching feed: %s", feed_info["name"])
+            _rate_acquire(feed_info["url"])
             feed = feedparser.parse(feed_info["url"])
             source_name = feed.feed.get("title", feed_info["name"])
 

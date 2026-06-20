@@ -34,6 +34,7 @@ _log = get_logger("pap")
 
 from tradingview_mcp.core.data.polish_diacritics import restore_diacritics
 from tradingview_mcp.core.services.proxy_manager import build_opener_with_proxy
+from tradingview_mcp.core.services.rate_limiter import gated_urlopen, RateLimitTimeout
 
 _LISTING_URL = "https://biznes.pap.pl/"
 _BASE = "https://biznes.pap.pl"
@@ -64,8 +65,10 @@ def _fetch(url: str, timeout: int = _TIMEOUT) -> str:
         opener = build_opener_with_proxy(_UA)
         with opener.open(req, timeout=timeout) as r:
             return r.read(500_000).decode("utf-8", errors="replace")
+    except RateLimitTimeout:
+        raise  # shed by the queue → fail fast, don't burn a second slot on fallback
     except Exception:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
+        with gated_urlopen(req, timeout=timeout) as r:
             return r.read(500_000).decode("utf-8", errors="replace")
 
 

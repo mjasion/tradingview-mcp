@@ -14,6 +14,7 @@ from tradingview_mcp.core.types import (
 )
 from tradingview_mcp.core.services.coinlist import load_symbols
 from tradingview_mcp.core.services.indicators import compute_metrics
+from tradingview_mcp.core.services.rate_limiter import acquire as _rate_acquire
 from tradingview_mcp.core.services.tv_scanner import (
     TVScannerEmpty,
     TVScannerUnavailable,
@@ -241,6 +242,7 @@ def fetch_multi_changes(
     if limit:
         q = q.limit(int(limit))
 
+    _rate_acquire("scanner.tradingview.com")
     _total, df = q.get_scanner_data(cookies=cookies)
     if df is None or df.empty:
         return []
@@ -382,6 +384,7 @@ def fetch_multi_timeframe_patterns(
         q = q.where(Column("exchange") == exchange.upper())
         q = q.limit(len(symbols))
 
+        _rate_acquire("scanner.tradingview.com")
         _total, df = q.get_scanner_data()
         if df is None or df.empty:
             return []

@@ -1,6 +1,7 @@
 from __future__ import annotations
 from typing import List, Dict, Any, Optional
 from ..utils.validators import get_market_type
+from .rate_limiter import acquire as _rate_acquire
 
 
 def _tf_to_tv_resolution(tf: Optional[str]) -> Optional[str]:
@@ -70,6 +71,7 @@ def fetch_screener_indicators(
     if limit:
         q = q.limit(int(limit))
 
+    _rate_acquire("scanner.tradingview.com")
     total, df = q.get_scanner_data(cookies=cookies)
 
     rows: List[Dict[str, Any]] = []
@@ -173,6 +175,7 @@ def fetch_screener_multi_changes(
     if limit:
         q = q.limit(int(limit))
 
+    _rate_acquire("scanner.tradingview.com")
     total, df = q.get_scanner_data(cookies=cookies)
     rows: List[Dict[str, Any]] = []
     if df is None or df.empty:

@@ -12,6 +12,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from tradingview_mcp.core.services.coinlist import load_symbols
+from tradingview_mcp.core.services.rate_limiter import acquire as _rate_acquire
 from tradingview_mcp.core.services.indicators import (
     compute_metrics,
     extract_extended_indicators,
@@ -1031,6 +1032,7 @@ def analyze_egx_fibonacci(
                 .select("close", high_col, low_col)
                 .set_tickers([full_symbol])
             )
+            _rate_acquire("scanner.tradingview.com")
             _, df = q.get_scanner_data()
             if not df.empty:
                 row = df.iloc[0]

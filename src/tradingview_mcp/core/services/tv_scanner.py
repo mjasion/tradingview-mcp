@@ -37,6 +37,7 @@ import time
 from typing import Any, Iterable, Optional
 
 from tradingview_mcp.core.services.log import get_logger
+from tradingview_mcp.core.services.rate_limiter import acquire as _rate_acquire
 
 _log = get_logger("tv_scanner")
 
@@ -93,7 +94,14 @@ def _is_outage(exc: BaseException) -> bool:
 # ── Core call (uncached) ──────────────────────────────────────────────────────
 
 def _do_call(screener: str, interval: str, symbols: list[str]) -> dict[str, Any]:
-    """Single TA call with retry/backoff. Raises TVScannerUnavailable on outage."""
+    """Single TA call with retry/backoff. Raises TVScannerUnavailable on outage.
+
+    Reached only on a cache miss, so this is the one chokepoint for every
+    ``tradingview_ta`` consumer (scanner, screener, multi-agent, commodity,
+    egx). One global rate-limit slot per cache-miss; the retry loop below uses
+    its own backoff so we don't double-throttle transient failures.
+    """
+    _rate_acquire("scanner.tradingview.com")
     last_exc: Optional[BaseException] = None
     for attempt in range(len(_RETRY_DELAYS) + 1):
         try:

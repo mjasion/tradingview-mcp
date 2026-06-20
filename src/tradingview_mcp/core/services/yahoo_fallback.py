@@ -56,6 +56,7 @@ from tradingview_mcp.core.services.indicators_calc import (
 )
 from tradingview_mcp.core.services.log import get_logger
 from tradingview_mcp.core.services.proxy_manager import build_opener_with_proxy
+from tradingview_mcp.core.services.rate_limiter import gated_urlopen, RateLimitTimeout
 from tradingview_mcp.core.utils.validators import is_stock_exchange
 
 _log = get_logger("yahoo_fallback")
@@ -151,7 +152,7 @@ def _fetch_yahoo_ohlcv(symbol: str, interval: str, range_: str) -> list[dict]:
 
     data = None
     try:
-        with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:
+        with gated_urlopen(req, timeout=_TIMEOUT) as resp:
             data = json.loads(resp.read().decode("utf-8"))
     except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError):
         pass
@@ -161,6 +162,8 @@ def _fetch_yahoo_ohlcv(symbol: str, interval: str, range_: str) -> list[dict]:
             opener = build_opener_with_proxy(_UA)
             with opener.open(url, timeout=_TIMEOUT + 4) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
+        except RateLimitTimeout:
+            raise  # shed by the queue → fail fast, don't wrap as a fetch error
         except Exception as e:
             raise RuntimeError(f"yahoo fetch failed (direct + proxy): {e}") from e
 
@@ -208,7 +211,7 @@ def _fetch_stooq_ohlcv(symbol: str, interval: str) -> list[dict]:
         url = f"{_STOOQ_HIST}?s={cand}&i={i_code}"
         try:
             req = urllib.request.Request(url, headers={"User-Agent": _UA})
-            with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:
+            with gated_urlopen(req, timeout=_TIMEOUT) as resp:
                 text = resp.read().decode("utf-8", errors="replace")
         except Exception as e:
             last_err = e

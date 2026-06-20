@@ -32,6 +32,7 @@ from typing import Optional
 
 from tradingview_mcp.core.services.cache import cached
 from tradingview_mcp.core.services.log import get_logger
+from tradingview_mcp.core.services.rate_limiter import gated_urlopen
 
 _log = get_logger("sec")
 
@@ -47,7 +48,7 @@ def _http_json(url: str) -> dict:
         "User-Agent": _UA,
         "Accept": "application/json",
     })
-    with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:
+    with gated_urlopen(req, timeout=_TIMEOUT) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
 
