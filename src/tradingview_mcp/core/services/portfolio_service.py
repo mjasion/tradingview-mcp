@@ -27,7 +27,7 @@ from typing import Optional
 
 from tradingview_mcp.core.services.log import get_logger
 from tradingview_mcp.core.services.news_service import fetch_news_summary
-from tradingview_mcp.core.services.screener_service import analyze_coin
+from tradingview_mcp.core.services.screener_service import analyze_coin, prefetch_ta
 from tradingview_mcp.core.services.sec_service import get_insider_transactions
 from tradingview_mcp.core.services.tv_scanner import rate_limit_state
 from tradingview_mcp.core.services.yahoo_finance_service import (
@@ -202,6 +202,12 @@ def portfolio_scan(
     _log.info("portfolio_scan: %d symbols on %s — %s",
               len(symbols), exchange, ", ".join(symbols[:6]) + (" …" if len(symbols) > 6 else ""))
     results: list[dict] = []
+
+    # One scanner request for the whole watchlist instead of one per symbol;
+    # every analyze_coin below then reads the cache.
+    warmed = prefetch_ta(symbols, exchange, timeframe)
+    _log.info("portfolio_scan: TradingView answered for %d/%d symbols in one batch",
+              warmed, len(symbols))
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {

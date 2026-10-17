@@ -12,6 +12,8 @@ from tradingview_mcp.core.services import portfolio_service as ps
 @pytest.fixture(autouse=True)
 def _isolated_cache(tmp_path, monkeypatch):
     monkeypatch.setenv("TRADINGVIEW_MCP_CACHE_DIR", str(tmp_path))
+    # The batch prefetch talks to TradingView; tests stub analyze_coin instead.
+    monkeypatch.setattr(ps, "prefetch_ta", lambda symbols, exchange, timeframe: 0)
     cache_mod.reset_for_tests()
     yield
     cache_mod.reset_for_tests()

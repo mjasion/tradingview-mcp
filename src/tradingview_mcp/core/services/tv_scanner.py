@@ -32,17 +32,24 @@ payload, same parser as the library) and handles each case on its own terms:
     in their budget fail fast with :class:`TVScannerRateLimited`
     (``reason="circuit_open"``) instead of each burning another minute. The
     first call after the TTL probes; any success closes the gate.
-4.  **Cache**: each ``(screener, interval, sorted-symbols)`` result is fresh
-    for 90s. Entries are kept up to 6h so callers that pass
-    ``allow_stale=True`` (and promise to report it) can get the last good
-    reading during an outage — capped at 4 bars of the interval, so a 15m
-    request never gets anything older than an hour.
+4.  **Outage cooldown**: once a call has burned its blip retries, further
+    calls fail fast for 15s instead of each spending another four requests
+    on a host that just proved it is down.
+5.  **Cache, per symbol**: each ``(screener, interval, symbol)`` reading is
+    fresh for 90s, and a call only asks TradingView for the symbols it
+    doesn't already hold — so one batched request (``portfolio_scan``
+    prefetches its whole watchlist) answers every per-symbol call after it.
+    Entries are kept up to 6h so callers that pass ``allow_stale=True`` (and
+    promise to report it) can get the last good reading during an outage —
+    capped at 4 bars of the interval, so a 15m request never gets anything
+    older than an hour.
 
 Tunables (env):
     TRADINGVIEW_MCP_TV_429_BACKOFF      first 429 wait, seconds (default 5)
     TRADINGVIEW_MCP_TV_429_MAX_BACKOFF  cap on one wait (default 60)
     TRADINGVIEW_MCP_TV_429_BUDGET       per-call total wait before giving up (default 60)
     TRADINGVIEW_MCP_TV_BREAKER_TTL      gate hold after a call gives up (default 300; 0 disables)
+    TRADINGVIEW_MCP_TV_OUTAGE_COOLDOWN  fail-fast window after a blip outage (default 15; 0 disables)
     TRADINGVIEW_MCP_TV_STALE_TTL        how long results stay usable as stale (default 21600; 0 disables)
 """
 from __future__ import annotations
@@ -115,6 +122,7 @@ _429_BACKOFF = _float_env("TRADINGVIEW_MCP_TV_429_BACKOFF", 5.0)
 _429_MAX_BACKOFF = _float_env("TRADINGVIEW_MCP_TV_429_MAX_BACKOFF", 60.0)
 _429_BUDGET = _float_env("TRADINGVIEW_MCP_TV_429_BUDGET", 60.0)
 _BREAKER_TTL = _float_env("TRADINGVIEW_MCP_TV_BREAKER_TTL", 300.0)
+_OUTAGE_COOLDOWN = _float_env("TRADINGVIEW_MCP_TV_OUTAGE_COOLDOWN", 15.0)
 _STALE_TTL = _float_env("TRADINGVIEW_MCP_TV_STALE_TTL", 6 * 3600.0)
 
 # Bar length per interval, for the stale cap. Unknown intervals get the daily
@@ -128,13 +136,14 @@ _STALE_BARS = 4
 # Patchable clock — tests swap in a fake one so the gate's waits are instant.
 _now = time.monotonic
 
-# In-memory cache. We can't use the on-disk @cached decorator because
-# tradingview_ta returns ``Analysis`` objects (not JSON-serializable). A
-# process-local dict absorbs bursts of duplicate calls and doubles as the
-# stale store; it doesn't need to survive restarts.
+# In-memory cache, one entry per (screener, interval, symbol). We can't use
+# the on-disk @cached decorator because tradingview_ta returns ``Analysis``
+# objects (not JSON-serializable). A process-local dict absorbs bursts of
+# duplicate calls and doubles as the stale store; it doesn't need to survive
+# restarts. A ``None`` value is a cached miss (TradingView has no such row).
 _CACHE_LOCK = threading.RLock()
-_CACHE: dict[tuple[str, str, tuple[str, ...]], tuple[float, dict[str, Any]]] = {}
-_CACHE_MAX = 2048
+_CACHE: dict[tuple[str, str, str], tuple[float, Any]] = {}
+_CACHE_MAX = 8192
 
 
 # ── Status-aware fetch ────────────────────────────────────────────────────────
@@ -206,7 +215,7 @@ def get_multiple_analysis(*, screener: str, interval: str, symbols: list[str]) -
 # the breaker is holding the gate for _BREAKER_TTL.
 
 _RL_LOCK = threading.Lock()
-_RL: dict[str, Any] = {"until": 0.0, "streak": 0, "tripped": False}
+_RL: dict[str, Any] = {"until": 0.0, "streak": 0, "tripped": False, "outage_until": 0.0}
 
 
 def _rl_note_429(retry_after: Optional[float]) -> float:
@@ -225,7 +234,7 @@ def _rl_note_429(retry_after: Optional[float]) -> float:
 def _rl_note_ok() -> None:
     with _RL_LOCK:
         was_limited = _RL["streak"] > 0
-        _RL.update(until=0.0, streak=0, tripped=False)
+        _RL.update(until=0.0, streak=0, tripped=False, outage_until=0.0)
     if was_limited:
         _log.info("TradingView answering again — 429 gate closed")
 
@@ -289,7 +298,7 @@ def rate_limit_state() -> Optional[dict[str, Any]]:
 
 def reset_rate_limit_for_tests() -> None:
     with _RL_LOCK:
-        _RL.update(until=0.0, streak=0, tripped=False)
+        _RL.update(until=0.0, streak=0, tripped=False, outage_until=0.0)
 
 
 def _is_outage(exc: BaseException) -> bool:
@@ -318,6 +327,13 @@ def _do_call(screener: str, interval: str, symbols: list[str]) -> dict[str, Any]
     egx). Each attempt takes a global rate-limit slot, and re-checks the 429
     gate after queueing for it — another thread may have hit a 429 meanwhile.
     """
+    with _RL_LOCK:
+        outage_wait = _RL["outage_until"] - _now()
+    if outage_wait > 0:
+        raise TVScannerUnavailable(
+            "scanner.tradingview.com failed moments ago; not queried, "
+            f"retry in ~{outage_wait:.0f}s"
+        )
     deadline = _now() + _429_BUDGET
     saw_429 = False
     blips = 0
@@ -366,6 +382,9 @@ def _do_call(screener: str, interval: str, symbols: list[str]) -> dict[str, Any]
         time.sleep(delay)
 
     # Exhausted retries.
+    if _OUTAGE_COOLDOWN > 0:
+        with _RL_LOCK:
+            _RL["outage_until"] = _now() + _OUTAGE_COOLDOWN
     raise TVScannerUnavailable(
         f"scanner.tradingview.com unavailable after "
         f"{len(_RETRY_DELAYS) + 1} attempts: {last_exc}"
@@ -393,8 +412,8 @@ def _stale_limit(interval: str) -> float:
     return min(_STALE_TTL, _STALE_BARS * bar)
 
 
-def _cache_get(key: tuple[str, str, tuple[str, ...]], max_age: float = _CACHE_TTL
-               ) -> Optional[tuple[float, dict[str, Any]]]:
+def _cache_get(key: tuple[str, str, str], max_age: float = _CACHE_TTL
+               ) -> Optional[tuple[float, Any]]:
     """``(age_seconds, value)`` when an entry younger than ``max_age`` exists."""
     with _CACHE_LOCK:
         entry = _CACHE.get(key)
@@ -410,7 +429,7 @@ def _cache_get(key: tuple[str, str, tuple[str, ...]], max_age: float = _CACHE_TT
         return age, value
 
 
-def _cache_put(key: tuple[str, str, tuple[str, ...]], value: dict[str, Any]) -> None:
+def _cache_put(key: tuple[str, str, str], value: Any) -> None:
     with _CACHE_LOCK:
         if len(_CACHE) >= _CACHE_MAX:
             horizon = time.time() - max(_CACHE_TTL, _STALE_TTL)
@@ -465,31 +484,45 @@ def ta_call(
     syms = sorted(set(s for s in symbols if s))
     if not syms:
         raise TVScannerEmpty("no symbols supplied")
+    if interval == "1D":  # same bar as "1d" for tradingview_ta; share the cache
+        interval = "1d"
 
-    key = (screener, interval, tuple(syms))
+    hits: dict[str, Any] = {}
     if use_cache:
-        hit = _cache_get(key)
-        if hit is not None:
-            _log.debug("tv_scanner cache hit for %s/%s (%d symbols)", screener, interval, len(syms))
-            return hit[1]
+        for s in syms:
+            hit = _cache_get((screener, interval, s))
+            if hit is not None:
+                hits[s] = hit[1]
+    missing = [s for s in syms if s not in hits]
+    if not missing:
+        _log.debug("tv_scanner cache hit for %s/%s (%d symbols)", screener, interval, len(syms))
+        return hits
+    if hits:
+        _log.debug("tv_scanner: %d/%d %s/%s symbols cached, asking for the rest",
+                   len(hits), len(syms), screener, interval)
 
     try:
-        result = _do_call(screener, interval, syms)
+        result = _do_call(screener, interval, missing)
     except TVScannerUnavailable as exc:
-        stale = _cache_get(key, max_age=_stale_limit(interval)) if allow_stale else None
-        if stale is None:
+        if not allow_stale:
             raise
-        age, value = stale
+        stale = {s: _cache_get((screener, interval, s), max_age=_stale_limit(interval))
+                 for s in missing}
+        if any(v is None for v in stale.values()):
+            raise
+        age = max(entry[0] for entry in stale.values())
         reason = getattr(exc, "reason", "unavailable")
         _log.warning("tv_scanner serving %.0fs-old cached %s/%s (%s)", age, screener, interval, reason)
-        return StaleAnalysis(value, age_seconds=age, reason=reason)
+        return StaleAnalysis({**hits, **{s: entry[1] for s, entry in stale.items()}},
+                             age_seconds=age, reason=reason)
 
-    if not result:
+    if not result and not hits:
         raise TVScannerEmpty(f"scanner returned no rows for {syms}")
 
     if use_cache:
-        _cache_put(key, result)
-    return result
+        for s, value in result.items():
+            _cache_put((screener, interval, s), value)
+    return {**hits, **result}
 
 
 # ── Response helpers ──────────────────────────────────────────────────────────

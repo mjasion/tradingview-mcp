@@ -12,9 +12,11 @@ from __future__ import annotations
 
 import pytest
 
+from tradingview_mcp.core.services import news_service as _news
 from tradingview_mcp.core.services import rate_limiter as _rl
 from tradingview_mcp.core.services import sentiment_service as _sent
 from tradingview_mcp.core.services import tv_scanner as _tv
+from tradingview_mcp.core.services import yahoo_finance_service as _yf
 
 
 @pytest.fixture(autouse=True)
@@ -50,3 +52,17 @@ def _open_tradingview_gate():
     _tv.reset_rate_limit_for_tests()
     yield
     _tv.reset_rate_limit_for_tests()
+
+
+@pytest.fixture(autouse=True)
+def _clear_request_memos():
+    """Drop the short-lived request memos (TradingView per-symbol cache, RSS
+    feeds, Yahoo quoteSummary block) so one test's fake upstream can't answer
+    the next test's call."""
+    _tv.reset_cache_for_tests()
+    _news.reset_feed_cache_for_tests()
+    _yf.reset_profile_cache_for_tests()
+    yield
+    _tv.reset_cache_for_tests()
+    _news.reset_feed_cache_for_tests()
+    _yf.reset_profile_cache_for_tests()

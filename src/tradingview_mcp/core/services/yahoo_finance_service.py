@@ -277,6 +277,68 @@ def _bootstrap_crumb() -> tuple[str, str]:
     return crumb, cookie_header
 
 
+def _raise_if_breaker_open(symbol: str) -> None:
+    open_, remaining = _breaker_is_open()
+    if open_:
+        _log.warning(
+            "Yahoo circuit-breaker OPEN — skipping call for %s (%.0fs remaining)",
+            symbol, remaining,
+        )
+        raise YahooRateLimited(
+            retry_after_seconds=remaining,
+            detail=(
+                f"Yahoo Finance circuit-breaker open ({remaining:.0f}s remaining) — "
+                f"recent persistent 429s. Wait for the breaker to close before retrying."
+            ),
+        )
+
+
+def _with_429_retry(fn, symbol: str):
+    """Run *fn* (one Yahoo request); on 429 back off and retry once.
+
+    Respects Retry-After when Yahoo sends it; otherwise backs off a few
+    seconds. The cooldown is recorded globally so other workers don't keep
+    banging on the door while we wait. A second 429 means we're not bursting,
+    we're blocked: trip the circuit breaker so later calls skip Yahoo
+    entirely, and raise a typed YahooRateLimited with the retry hint for the
+    MCP response. Other HTTP errors propagate unchanged.
+    """
+    try:
+        return fn()
+    except urllib.error.HTTPError as e:
+        if e.code != 429:
+            raise
+        retry_after_hdr = e.headers.get("Retry-After") if e.headers else None
+        delay = _parse_retry_after(retry_after_hdr, default=8.0)
+        _record_rate_limit(delay)
+        _log.warning(
+            "Yahoo 429 for %s — Retry-After=%s, backing off %.1fs (process-wide cooldown set) and retrying once",
+            symbol, retry_after_hdr or "<none>", delay,
+        )
+        time.sleep(delay)
+    try:
+        return fn()
+    except urllib.error.HTTPError as e2:
+        if e2.code != 429:
+            raise
+        second_hdr = e2.headers.get("Retry-After") if e2.headers else None
+        second_delay = _parse_retry_after(second_hdr, default=delay * 2)
+        _record_rate_limit(second_delay)
+        _trip_breaker()
+        _log.warning(
+            "Yahoo persistent 429 for %s — opening circuit breaker for %.0fs",
+            symbol, _BREAKER_OPEN_SECONDS,
+        )
+        raise YahooRateLimited(
+            retry_after_seconds=max(second_delay, _BREAKER_OPEN_SECONDS),
+            detail=(
+                f"Yahoo Finance rate limit persisted after one retry for {symbol}. "
+                f"Circuit breaker opened for {_BREAKER_OPEN_SECONDS:.0f}s; "
+                f"subsequent calls will short-circuit until it closes."
+            ),
+        ) from e2
+
+
 def _fetch_quote_summary(symbol: str, modules: list[str]) -> dict:
     """Fetch /v10/finance/quoteSummary modules for *symbol*. Returns module dict.
 
@@ -304,83 +366,38 @@ def _fetch_quote_summary(symbol: str, modules: list[str]) -> dict:
     # Circuit breaker: if a previous call confirmed Yahoo is rate-limiting this
     # IP, don't even send the request. Return the same typed exception so the
     # caller renders the structured rate_limited envelope without waiting.
-    open_, remaining = _breaker_is_open()
-    if open_:
-        _log.warning(
-            "Yahoo circuit-breaker OPEN — skipping call for %s (%.0fs remaining)",
-            symbol, remaining,
-        )
-        raise YahooRateLimited(
-            retry_after_seconds=remaining,
-            detail=(
-                f"Yahoo Finance circuit-breaker open ({remaining:.0f}s remaining) — "
-                f"recent persistent 429s. Wait for the breaker to close before retrying."
-            ),
-        )
-
-    if _CRUMB_CACHE["crumb"] is None:
-        _log.debug("bootstrapping Yahoo crumb token")
-        _CRUMB_CACHE["crumb"], _CRUMB_CACHE["cookies"] = _bootstrap_crumb()
+    _raise_if_breaker_open(symbol)
 
     # First wait out any active cooldown set by a previous 429 anywhere in
     # the process. Doing this BEFORE we grab the semaphore means we don't
-    # hold the (2-slot) budget while idle — other unrelated callers can still
-    # make progress if the cooldown is short.
+    # hold the budget while idle.
     _wait_for_rate_limit_window()
 
     # Serialize through the semaphore so parallel callers don't trip the 429
     # threshold. The wait is normally sub-second; we don't add a timeout because
     # callers (portfolio_scan) already cap symbol count.
     with _QUOTE_SUMMARY_SEM:
+        # A worker that queued here while another one tripped the breaker
+        # must not send its own doomed request.
+        _raise_if_breaker_open(symbol)
+        # Bootstrapping inside the semaphore makes it single-flight: parallel
+        # workers used to each fetch their own crumb — 2 requests apiece, and
+        # the getcrumb 429 escaped as a bare HTTPError, never reaching the
+        # breaker, so the next call bootstrapped again.
+        if _CRUMB_CACHE["crumb"] is None:
+            _log.debug("bootstrapping Yahoo crumb token")
+            _CRUMB_CACHE["crumb"], _CRUMB_CACHE["cookies"] = _with_429_retry(_bootstrap_crumb, symbol)
         try:
-            data = _do_call(_CRUMB_CACHE["crumb"], _CRUMB_CACHE["cookies"])
+            data = _with_429_retry(
+                lambda: _do_call(_CRUMB_CACHE["crumb"], _CRUMB_CACHE["cookies"]), symbol)
         except urllib.error.HTTPError as e:
-            if e.code in (401, 403):
-                _log.warning("Yahoo rejected our session (%s) — refreshing crumb and retrying", e.code)
-                _CRUMB_CACHE["crumb"], _CRUMB_CACHE["cookies"] = _bootstrap_crumb()
-                data = _do_call(_CRUMB_CACHE["crumb"], _CRUMB_CACHE["cookies"])
-            elif e.code == 429:
-                # Respect Retry-After when Yahoo sends it; otherwise back off
-                # for a few seconds. Record the cooldown globally so other
-                # workers don't keep banging on the door while we wait. One
-                # retry — beyond that the caller gets a typed YahooRateLimited
-                # with the retry hint to pass up to the MCP response.
-                retry_after_hdr = e.headers.get("Retry-After") if e.headers else None
-                delay = _parse_retry_after(retry_after_hdr, default=8.0)
-                _record_rate_limit(delay)
-                _log.warning(
-                    "Yahoo 429 for %s — Retry-After=%s, backing off %.1fs (process-wide cooldown set) and retrying once",
-                    symbol, retry_after_hdr or "<none>", delay,
-                )
-                time.sleep(delay)
-                try:
-                    data = _do_call(_CRUMB_CACHE["crumb"], _CRUMB_CACHE["cookies"])
-                except urllib.error.HTTPError as e2:
-                    if e2.code == 429:
-                        # Still rate-limited. This is the trigger for the
-                        # circuit breaker: a retry-after-wait still 429s means
-                        # we're not just bursting, we're banned. Trip the
-                        # breaker so subsequent calls skip Yahoo entirely.
-                        second_hdr = e2.headers.get("Retry-After") if e2.headers else None
-                        second_delay = _parse_retry_after(second_hdr, default=delay * 2)
-                        _record_rate_limit(second_delay)
-                        _trip_breaker()
-                        _log.warning(
-                            "Yahoo persistent 429 for %s — opening circuit breaker for %.0fs",
-                            symbol, _BREAKER_OPEN_SECONDS,
-                        )
-                        raise YahooRateLimited(
-                            retry_after_seconds=max(second_delay, _BREAKER_OPEN_SECONDS),
-                            detail=(
-                                f"Yahoo Finance rate limit persisted after one retry for {symbol}. "
-                                f"Circuit breaker opened for {_BREAKER_OPEN_SECONDS:.0f}s; "
-                                f"subsequent calls will short-circuit until it closes."
-                            ),
-                        ) from e2
-                    raise
-            else:
+            if e.code not in (401, 403):
                 _log.warning("Yahoo HTTP %s for %s", e.code, symbol)
                 raise
+            _log.warning("Yahoo rejected our session (%s) — refreshing crumb and retrying", e.code)
+            _CRUMB_CACHE["crumb"], _CRUMB_CACHE["cookies"] = _with_429_retry(_bootstrap_crumb, symbol)
+            data = _with_429_retry(
+                lambda: _do_call(_CRUMB_CACHE["crumb"], _CRUMB_CACHE["cookies"]), symbol)
 
     result = data.get("quoteSummary", {}).get("result") or []
     if not result:
@@ -430,6 +447,38 @@ def _rate_limited_response(base: dict, exc: YahooRateLimited) -> dict:
     }
 
 
+# get_earnings and get_dividends read overlapping quoteSummary modules for the
+# same symbol, usually back to back (portfolio_scan). Asking for the union once
+# and sharing the block halves the requests on the endpoint Yahoo throttles
+# hardest. Kept briefly in memory: each tool's own disk cache does the rest.
+_PROFILE_MODULES = ["calendarEvents", "earningsHistory", "summaryDetail", "defaultKeyStatistics"]
+_PROFILE_TTL = 600.0  # seconds
+_PROFILE_LOCK = threading.Lock()
+_PROFILE_CACHE: dict[str, tuple[float, dict]] = {}
+
+
+def _fetch_profile(symbol: str) -> dict:
+    """quoteSummary block with every module earnings + dividends need.
+    Raises like ``_fetch_quote_summary``; failures are not remembered."""
+    key = symbol.upper()
+    with _PROFILE_LOCK:
+        entry = _PROFILE_CACHE.get(key)
+        if entry and time.monotonic() - entry[0] < _PROFILE_TTL:
+            _log.debug("reusing Yahoo quoteSummary block for %s", key)
+            return entry[1]
+    block = _fetch_quote_summary(symbol, _PROFILE_MODULES)
+    with _PROFILE_LOCK:
+        if len(_PROFILE_CACHE) >= 512:
+            _PROFILE_CACHE.clear()
+        _PROFILE_CACHE[key] = (time.monotonic(), block)
+    return block
+
+
+def reset_profile_cache_for_tests() -> None:
+    with _PROFILE_LOCK:
+        _PROFILE_CACHE.clear()
+
+
 def _ts_to_iso(ts: Optional[int]) -> Optional[str]:
     if ts is None:
         return None
@@ -449,7 +498,7 @@ def get_earnings(symbol: str) -> dict:
     """
     out: dict = {"symbol": symbol.upper(), "source": "Yahoo Finance"}
     try:
-        block = _fetch_quote_summary(symbol, ["calendarEvents", "earningsHistory"])
+        block = _fetch_profile(symbol)
     except YahooRateLimited as e:
         return _rate_limited_response(out, e)
     except Exception as e:
@@ -500,9 +549,7 @@ def get_dividends(symbol: str) -> dict:
     """
     out: dict = {"symbol": symbol.upper(), "source": "Yahoo Finance"}
     try:
-        block = _fetch_quote_summary(
-            symbol, ["summaryDetail", "calendarEvents", "defaultKeyStatistics"]
-        )
+        block = _fetch_profile(symbol)
     except YahooRateLimited as e:
         return _rate_limited_response(out, e)
     except Exception as e:

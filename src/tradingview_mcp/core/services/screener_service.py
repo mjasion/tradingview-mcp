@@ -430,6 +430,44 @@ def fetch_multi_timeframe_patterns(
 
 # ── Coin analysis (single asset) ───────────────────────────────────────────────
 
+def tv_target(symbol: str, exchange: str) -> tuple[str, str]:
+    """``(EXCHANGE:TICKER, screener)`` that ``analyze_coin`` asks TradingView for.
+
+    The exchange is matched case-insensitively: ``portfolio_scan`` passes
+    ``"NASDAQ"`` straight through, and the uppercase key used to miss
+    ``EXCHANGE_SCREENER`` and send every ticker to the crypto screener.
+    """
+    ex = exchange.strip().lower()
+    full_symbol = symbol.upper() if ":" in symbol else f"{get_tv_exchange_prefix(ex)}:{symbol.upper()}"
+    return full_symbol, EXCHANGE_SCREENER.get(ex, "crypto")
+
+
+def prefetch_ta(symbols: list[str], exchange: str, timeframe: str, batch_size: int = 200) -> int:
+    """Warm the scanner cache for *symbols* with one request per screener batch.
+
+    ``analyze_coin`` asks for one symbol at a time; a watchlist of N would
+    cost N requests. After this, each of those calls is a cache hit. Failures
+    are left for the per-symbol calls to report (and fall back) — they hit the
+    same gate / cooldown, so they don't re-ask a TradingView that just failed.
+    Returns the number of symbols TradingView answered for.
+    """
+    if not _TA_AVAILABLE:
+        return 0
+    by_screener: dict[str, list[str]] = {}
+    for sym in symbols:
+        full_symbol, screener = tv_target(sym, exchange)
+        by_screener.setdefault(screener, []).append(full_symbol)
+    answered = 0
+    for screener, full_symbols in by_screener.items():
+        for i in range(0, len(full_symbols), batch_size):
+            try:
+                result = ta_call(screener, timeframe, full_symbols[i:i + batch_size])
+            except (TVScannerUnavailable, TVScannerEmpty):
+                continue
+            answered += sum(1 for v in result.values() if v is not None)
+    return answered
+
+
 def analyze_coin(
     symbol: str,
     exchange: str,
@@ -459,8 +497,7 @@ def analyze_coin(
     if not _TA_AVAILABLE:
         return {"error": "tradingview_ta is missing; run `uv sync`."}
 
-    full_symbol = symbol.upper() if ":" in symbol else f"{get_tv_exchange_prefix(exchange)}:{symbol.upper()}"
-    screener = EXCHANGE_SCREENER.get(exchange, "crypto")
+    full_symbol, screener = tv_target(symbol, exchange)
 
     try:
         analysis = ta_call(screener, timeframe, [full_symbol], allow_stale=True)

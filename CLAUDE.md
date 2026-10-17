@@ -120,7 +120,7 @@ TradingView TA: an error envelope carries `upstream_status: "rate_limited"`
 
 Tests that pin this contract: `test_sentiment_gaps.py`,
 `test_news_health.py`, `test_apewisdom.py`, `test_combined_confluence.py`,
-`test_tv_rate_limit.py`.
+`test_tv_rate_limit.py`. Request counts are pinned in `test_request_economy.py`.
 Adding a new source means adding its failure row there too.
 
 ## Sentiment and news sources
@@ -152,6 +152,17 @@ Adding a new source means adding its failure row there too.
 - **`feeds.reuters.com` is NXDOMAIN** and used to be the only `stocks` feed.
   Current list: MarketWatch Top Stories, CNBC Finance, CNBC Top News,
   Investing.com, Seeking Alpha. Verify a feed live before adding it.
+- **Feeds are memoised per URL** (`news_service._get_feed`: successes 5 min,
+  env `TRADINGVIEW_MCP_NEWS_FEED_TTL`, failures 60s, one fetch in flight per
+  URL). Every symbol in a scan reads the same general feeds; only its own
+  Google News search feed is new. Tests patch `_parse_feed`, below the memo.
+- **`get_earnings` + `get_dividends` share one quoteSummary** request
+  (`yahoo_finance_service._fetch_profile`, union of their modules, 10 min in
+  memory; failures aren't shared). The crumb bootstrap (fc.yahoo.com +
+  `getcrumb`) runs inside `_QUOTE_SUMMARY_SEM`, so parallel workers wait for
+  one crumb instead of each fetching their own, and its 429s go through
+  `_with_429_retry` like the quoteSummary call: one retry, then the breaker.
+  A worker queued behind a tripped breaker re-checks it and sends nothing.
 - **Feeds go through `build_opener_with_proxy()`**, not `feedparser.parse(url)`
   — CNBC 403s feedparser's own UA, and the opener carries the egress proxy and
   the rate limiter. `feedparser` only parses bytes we hand it.
@@ -180,6 +191,15 @@ Adding a new source means adding its failure row there too.
   `ta_call(..., allow_stale=True)`, and only for callers that then spread
   `stale_fields(analysis)` into their response. Error envelopes use
   `upstream_fields(exc)`.
+- **The cache is per `(screener, interval, symbol)`** and `ta_call` only asks
+  for the symbols it doesn't hold, so a batched call answers later
+  single-symbol ones. `portfolio_scan` uses that: `prefetch_ta` sends one
+  request per screener for the whole watchlist before the per-symbol fan-out.
+  Build the `EXCHANGE:TICKER` + screener with `screener_service.tv_target()`
+  (case-insensitive) — an uppercase `"NASDAQ"` used to fall through
+  `EXCHANGE_SCREENER` to `crypto` and every stock read "No data found".
+- **Outage cooldown**: once a call has burned its blip retries, calls fail fast
+  for 15s (`TRADINGVIEW_MCP_TV_OUTAGE_COOLDOWN`), reported as `down`.
 - **TradingView traffic bypasses the egress proxies** — `requests.post`
   goes out directly, only the global rate limiter applies.
   `conftest.py` resets the gate around every test.

@@ -25,6 +25,9 @@ routes the request via the egress proxy and the global rate limiter.
 """
 from __future__ import annotations
 
+import os
+import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -154,6 +157,58 @@ def _parse_feed(url: str):
     return parsed
 
 
+# Every symbol in a portfolio_scan re-reads the same general feeds; within a
+# few minutes they are byte-identical. Remember each feed's outcome briefly —
+# successes for _FEED_TTL, failures for _FEED_FAIL_TTL so a dead feed's 10s
+# timeout is paid once, not once per symbol. A per-URL lock makes concurrent
+# workers wait for the one fetch in flight instead of each starting their own.
+def _float_env(name: str, default: float) -> float:
+    try:
+        return max(0.0, float(os.environ.get(name, default)))
+    except ValueError:
+        return default
+
+
+_FEED_TTL = _float_env("TRADINGVIEW_MCP_NEWS_FEED_TTL", 300.0)
+_FEED_FAIL_TTL = min(_FEED_TTL, 60.0)
+_FEED_CACHE: dict[str, tuple[float, object, Optional[Exception]]] = {}
+_FEED_LOCKS: dict[str, threading.Lock] = {}
+_FEED_LOCKS_GUARD = threading.Lock()
+
+
+def _get_feed(url: str):
+    """``_parse_feed`` behind a short per-URL memo. Re-raises a remembered
+    failure, so the caller still records that feed as failed."""
+    if _FEED_TTL <= 0:
+        return _parse_feed(url)
+    with _FEED_LOCKS_GUARD:
+        lock = _FEED_LOCKS.setdefault(url, threading.Lock())
+    with lock:
+        entry = _FEED_CACHE.get(url)
+        if entry is not None:
+            stored_at, feed, err = entry
+            if time.monotonic() - stored_at < (_FEED_FAIL_TTL if err else _FEED_TTL):
+                _log.debug("feed cache hit: %s", url)
+                if err is not None:
+                    raise err
+                return feed
+        try:
+            feed = _parse_feed(url)
+        except Exception as e:
+            _FEED_CACHE[url] = (time.monotonic(), None, e)
+            raise
+        if len(_FEED_CACHE) >= 256:
+            _FEED_CACHE.clear()
+        _FEED_CACHE[url] = (time.monotonic(), feed, None)
+        return feed
+
+
+def reset_feed_cache_for_tests() -> None:
+    with _FEED_LOCKS_GUARD:
+        _FEED_CACHE.clear()
+        _FEED_LOCKS.clear()
+
+
 def _feed_error(e: Exception) -> str:
     """Short machine-readable tag for a failed feed."""
     if isinstance(e, urllib.error.HTTPError):
@@ -243,7 +298,7 @@ def fetch_news_with_health(
             break
         try:
             _log.debug("fetching feed: %s", feed_info["name"])
-            feed = _parse_feed(feed_info["url"])
+            feed = _get_feed(feed_info["url"])
         except Exception as e:
             reason = _feed_error(e)
             feeds_failed[feed_info["name"]] = reason
