@@ -13,6 +13,7 @@ from __future__ import annotations
 import pytest
 
 from tradingview_mcp.core.services import rate_limiter as _rl
+from tradingview_mcp.core.services import sentiment_service as _sent
 
 
 @pytest.fixture(autouse=True)
@@ -23,3 +24,16 @@ def _disable_global_rate_limit():
     _rl._INSTANCE = _rl.RateLimiter(enabled=False)
     yield
     _rl.reset_for_tests()
+
+
+@pytest.fixture(autouse=True)
+def _close_reddit_circuit():
+    """Start every test with the Reddit breaker closed.
+
+    It is process-global by design (one MCP server, one Reddit), so a test that
+    exercises a full sweep failure would otherwise make the *next* test skip
+    Reddit entirely and silently fall through to the live ApeWisdom path.
+    """
+    _sent._reset_breaker()
+    yield
+    _sent._reset_breaker()

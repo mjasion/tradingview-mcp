@@ -488,7 +488,23 @@ def multi_timeframe_analysis(symbol: str, exchange: str = "KUCOIN") -> dict:
 
 @mcp.tool()
 def market_sentiment(symbol: str, category: str = "all", limit: int = 20) -> dict:
-    """Real-time Reddit sentiment analysis for stocks and crypto.
+    """Reddit sentiment for stocks and crypto — with an explicit data-quality status.
+
+    ALWAYS check ``status`` before using the numbers:
+
+    * ``ok`` / ``partial`` — posts were scored; ``sentiment_score`` (-1..+1)
+      and ``sentiment_label`` are real. ``partial`` means some subreddits
+      failed (see ``sources_failed``).
+    * ``degraded`` — Reddit's search API is blocked for this server, so
+      ``mentions`` carries ApeWisdom mention *volume* instead.
+      ``sentiment_score`` is ``None``, label is ``MENTIONS_ONLY``: there is no
+      bullish/bearish reading, only how much a ticker is being talked about.
+    * ``no_data`` — Reddit answered, nothing mentioned the symbol.
+    * ``unavailable`` — every source failed; ``sentiment_score`` is ``None``,
+      label is ``UNAVAILABLE``, ``error`` says why.
+
+    A missing reading is never reported as "Neutral" — a ``sentiment_score``
+    of ``None`` means no data, not a neutral market.
 
     Args:
         symbol: Asset symbol ("AAPL", "BTC", "ETH", "TSLA")
@@ -526,6 +542,16 @@ def financial_news(
     exchange: str = None,
 ) -> dict:
     """Real-time financial news from RSS feeds.
+
+    Check ``status`` before concluding anything from ``count``: ``ok`` /
+    ``partial`` (items found), ``no_matches`` (feeds answered, nothing mentions
+    the symbol — a real absence of coverage), ``no_news``, or ``unavailable``
+    (every feed failed — the zero means "could not look"). ``sources`` lists
+    which feeds answered and which failed, with the reason.
+
+    When ``symbol`` is given, a Google News search feed for that ticker is
+    added on top of the category feeds — general business feeds rarely name a
+    mid-cap, which is why per-ticker queries used to come back empty.
 
     Args:
         symbol: Optional symbol filter ("AAPL", "BTC", "KGH"). None = all news.
@@ -585,18 +611,37 @@ def combined_analysis(symbol: str, exchange: str = "NASDAQ", timeframe: str = "1
     else:
         sent_cat = "crypto" if is_crypto else "stocks"
         sentiment = analyze_sentiment(symbol, category=sent_cat)
-        tech_momentum = tech.get("market_sentiment", {}).get("momentum", "") if isinstance(tech, dict) else ""
-        tech_bullish = tech_momentum == "Bullish"
-        sent_bullish = sentiment.get("sentiment_score", 0) > 0.1
-        signals_agree = tech_bullish == sent_bullish
-        confidence = "HIGH" if signals_agree else "MIXED"
         tech_signal = tech.get("market_sentiment", {}).get("buy_sell_signal", "N/A") if isinstance(tech, dict) else "N/A"
-        recommendation = (
-            f"Technical {tech_signal} "
-            f"{'confirmed by' if signals_agree else 'conflicts with'} "
-            f"{sentiment.get('sentiment_label', 'Neutral')} Reddit sentiment "
-            f"({sentiment.get('posts_analyzed', 0)} posts analyzed)"
-        )
+
+        if sentiment.get("status") in ("ok", "partial"):
+            tech_momentum = tech.get("market_sentiment", {}).get("momentum", "") if isinstance(tech, dict) else ""
+            tech_bullish = tech_momentum == "Bullish"
+            sent_bullish = sentiment.get("sentiment_score", 0) > 0.1
+            signals_agree = tech_bullish == sent_bullish
+            confidence = "HIGH" if signals_agree else "MIXED"
+            recommendation = (
+                f"Technical {tech_signal} "
+                f"{'confirmed by' if signals_agree else 'conflicts with'} "
+                f"{sentiment.get('sentiment_label')} Reddit sentiment "
+                f"({sentiment.get('posts_analyzed', 0)} posts analyzed)"
+            )
+        else:
+            # No sentiment sample: a missing pillar must not be scored as
+            # agreement. Confluence degrades exactly like the GPW path rather
+            # than reading a 0.0 placeholder as "bearish and therefore agreed".
+            signals_agree = None
+            confidence = "TECHNICAL_ONLY"
+            mentions = sentiment.get("mentions") or {}
+            if sentiment.get("status") == "degraded" and mentions.get("status") == "ok":
+                extra = (
+                    f"; Reddit scoring unavailable, ApeWisdom mention volume only "
+                    f"({mentions.get('mentions_24h')} mentions/24h, rank {mentions.get('rank')})"
+                )
+            elif sentiment.get("status") == "degraded":
+                extra = "; Reddit scoring unavailable, ticker not in the ApeWisdom ranking (no measurable retail chatter)"
+            else:
+                extra = f"; sentiment {sentiment.get('status')} — {sentiment.get('reason', 'no sample')}"
+            recommendation = f"{tech_signal} on technicals alone{extra}"
 
     return {
         "symbol": symbol,

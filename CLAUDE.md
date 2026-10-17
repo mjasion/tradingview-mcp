@@ -5,7 +5,8 @@ Guide for Claude Code working in this repository.
 ## What this is
 
 MCP server exposing ~29 tools for technical analysis, screening, backtesting,
-sentiment, and news — wrapping TradingView, Yahoo Finance, Stooq, and Reddit.
+sentiment, and news — wrapping TradingView, Yahoo Finance, Stooq, RSS/Google News, and
+Reddit (with an ApeWisdom fallback).
 Fork of `atilaahmettaner/tradingview-mcp` extended with global stock market
 coverage and Polish data providers.
 
@@ -33,7 +34,8 @@ src/tradingview_mcp/
     │   ├── stooq_service.py           # GPW spot prices (Yahoo doesn't cover .WA)
     │   ├── pap_scraper.py             # PAP Biznes news (HTML scraper, no public RSS)
     │   ├── news_service.py            # RSS aggregator + PAP fallback
-    │   ├── sentiment_service.py       # Reddit sentiment
+    │   ├── sentiment_service.py       # Reddit sentiment (+ ApeWisdom fallback)
+    │   ├── apewisdom_service.py       # Reddit mention *volume* when Reddit itself 403s
     │   ├── screener_service.py        # TradingView screener wrappers
     │   ├── scanner_service.py         # signal-based scanners
     │   ├── backtest_service.py        # 6 strategy backtests
@@ -70,6 +72,86 @@ tests/unit/                            # pytest, all fast (no network)
   Each service returns plain dicts shaped like Yahoo Finance quote dicts where
   applicable so they're swappable.
 
+## Data-quality contract
+
+An upstream that fails must never be indistinguishable from a real reading.
+The bug this rule exists for: Reddit started answering 403 to this server,
+`_fetch_reddit_posts` swallowed it into `[]`, `analyze_sentiment` scored the
+empty list as `0.0` / `"Neutral"`, and `combined_analysis` then found that
+fabricated zero "agreed" with a bearish technical and reported
+`confidence: HIGH`. A consumer had no way to tell.
+
+Rules for any tool that reads an external source:
+
+- **Every response carries a `status`.** A numeric reading is `None` when
+  there is no sample — never `0.0`, never a neutral label.
+- **Fetch helpers raise, callers classify.** `_fetch_reddit_posts` raises
+  `RedditFetchError(reason)`; `news_service._parse_feed` raises. Error tags are
+  short and machine-readable: `http_403`, `unreachable: <reason>`, `timeout`,
+  `parse_error: <Type>`.
+- **Name the casualties.** Multi-source tools report `sources_ok` /
+  `sources_failed` (sentiment) or `sources: {attempted, ok, failed}` (news), so
+  a partial answer says what is missing from it.
+- **"Nothing found" is a reading; say so.** `no_data` / `no_matches` /
+  `not_ranked` are distinct from `unavailable`, and carry a note spelling out
+  that the zero is real.
+
+`market_sentiment` statuses: `ok` · `partial` (some subreddits died, score
+still computed) · `degraded` (Reddit unusable, ApeWisdom answered —
+`sentiment_label: "MENTIONS_ONLY"`, score `None`, `mentions` block) ·
+`no_data` (Reddit reachable, zero posts) · `unavailable` (everything failed).
+
+`financial_news` statuses: `ok` · `partial` · `no_matches` (feeds alive, the
+symbol just isn't in the news) · `no_news` · `unavailable` (every feed failed —
+also sets `error: "all_feeds_failed"`).
+
+`combined_analysis` only scores confluence when sentiment `status` is `ok` or
+`partial`. Otherwise `signals_agree: None`, `confidence: "TECHNICAL_ONLY"`, and
+the recommendation states why. `portfolio_scan` was already honest
+(`upstream_warning`, `degraded_count`, `yahoo_rate_limit`) and additionally
+surfaces `news_error`.
+
+Tests that pin this contract: `test_sentiment_gaps.py`,
+`test_news_health.py`, `test_apewisdom.py`, `test_combined_confluence.py`.
+Adding a new source means adding its failure row there too.
+
+## Sentiment and news sources
+
+- **Reddit refuses unauthenticated `.json`** — OAuth-only policy since 2023,
+  not a UA or IP filter: `www.reddit.com/r/*/search.json` answers 403
+  (`server: snooserv`, no Cloudflare challenge) to a browser UA and a bot UA
+  alike, and from a home IP as readily as from the proxies. `old.reddit.com`
+  returns HTML instead of JSON, and `robots.txt` is `Disallow: /`. Verified
+  2026-08-30. `POST /api/v1/access_token` answers **401, not 403**, from every
+  egress — so a registered script app (client_credentials → `oauth.reddit.com`,
+  100 QPM free) would restore directional sentiment. The owner has decided
+  against registering one; don't re-litigate it, and don't try to route around
+  the block with UA spoofing or proxy rotation (it fails anyway, and the
+  Public Content Policy forbids it).
+- **A failed sweep opens a circuit breaker** (`_BREAKER_TTL`, 6h, env
+  `TRADINGVIEW_MCP_REDDIT_BREAKER_TTL`, `0` disables). Five dead subreddits
+  cost ~34s — mostly 10s timeouts — on *every* `market_sentiment` and
+  `combined_analysis`; with the breaker that is paid once per TTL and later
+  calls are instant. A skipped sweep reports `sources_failed:
+  {"reddit": "circuit_open: …"}` plus a `reddit_circuit` block, never fabricated
+  403s. Any subreddit answering closes it, and the first call after the TTL
+  probes again, so restored access self-heals. It is process-global, so
+  `tests/unit/conftest.py` resets it around every test.
+- **`apewisdom_service.py` is the fallback**: it aggregates the same subreddits
+  and is reachable. It measures **mention volume, not direction** — never map
+  its numbers onto a sentiment score. `fetch_mentions()` returns `ok` /
+  `not_ranked` / `unavailable`; ranking pages are cached 30 min.
+- **`feeds.reuters.com` is NXDOMAIN** and used to be the only `stocks` feed.
+  Current list: MarketWatch Top Stories, CNBC Finance, CNBC Top News,
+  Investing.com, Seeking Alpha. Verify a feed live before adding it.
+- **Feeds go through `build_opener_with_proxy()`**, not `feedparser.parse(url)`
+  — CNBC 403s feedparser's own UA, and the opener carries the egress proxy and
+  the rate limiter. `feedparser` only parses bytes we hand it.
+- **A per-symbol Google News search feed** is prepended whenever `symbol` is
+  given; general feeds rarely name a mid-cap. Its results are `prefiltered`
+  (the query already asked the ticker question), so the substring filter is
+  skipped for it — "Apple beats on iPhone" is an AAPL story.
+
 ## Polish-market specifics
 
 - `yahoo_price()` routes Polish tickers to Stooq:
@@ -82,6 +164,8 @@ tests/unit/                            # pytest, all fast (no network)
   `pap_scraper.py` (HTML; PAP has no public RSS — verified all known endpoints).
 - Symbol filter on Polish news expands the ticker via
   `gpw_company_names.GPW_COMPANY_NAMES` (e.g. `KGH` matches "KGHM", "Polska Miedź").
+  **Alias order matters**: `aliases[0]` becomes the Google News PL query, so the
+  first entry must be the name headlines actually print ("KGHM", not "KGH").
 
 ## Running locally
 
@@ -118,7 +202,8 @@ chokepoints — so new network code is throttled automatically if it uses them:
 - direct fetches: `rate_limiter.gated_urlopen()` (sec, bitcoin, yahoo/stooq
   fallbacks, backtest, pap fallback) — use this, not `urllib.request.urlopen`
 - `tradingview_ta`: one `acquire()` in `tv_scanner._do_call` (cache miss only)
-- `tradingview_screener` + `feedparser`: an `acquire()` before each call site
+- `tradingview_screener`: an `acquire()` before each call site (RSS feeds and
+  ApeWisdom ride the proxy opener instead)
 
 Config (env): `TRADINGVIEW_MCP_RATE_LIMIT_ENABLED` (default true),
 `_RPS` (default 1.0; ≤0 disables), `_MAX_WAIT` (default 30s; a caller that would

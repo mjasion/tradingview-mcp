@@ -146,6 +146,9 @@ def _scan_one(
         if isinstance(news, dict):
             news_count = int(news.get("count") or len(news.get("items") or []))
             out["news_count"] = news_count
+            # A zero count from dead feeds must not read as "quiet week".
+            if news.get("status") == "unavailable":
+                out["news_error"] = news.get("error", "news_unavailable")
     except Exception as e:
         out["news_error"] = f"{type(e).__name__}: {e}"
 

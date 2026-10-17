@@ -7,6 +7,9 @@ about KGHM Polska Miedź — but ``KGHM`` and ``Polska Miedź`` do.
 Each entry maps a TradingView/GPW ticker to a list of search aliases (names
 *and* common ticker variants). Match is substring, case-insensitive.
 
+**Order matters**: the first alias must be the name headlines actually use —
+news_service._symbol_feed() takes aliases[0] as the Google News query.
+
 Used by news_service when a Polish ticker is filtered against pl_stocks RSS
 feeds (Bankier, Money.pl, Comparic).
 

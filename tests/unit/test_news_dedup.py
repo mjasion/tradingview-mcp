@@ -52,7 +52,7 @@ def test_fetch_news_dedups_and_sorts(monkeypatch):
         feed = {"title": "Fake Source"}
         entries = fake_entries
 
-    monkeypatch.setattr(news_service.feedparser, "parse", lambda url: _Feed())
+    monkeypatch.setattr(news_service, "_parse_feed", lambda url: _Feed())
     monkeypatch.setattr(news_service, "RSS_FEEDS", {"stocks": [{"url": "x", "name": "Fake Source"}]})
 
     items = news_service.fetch_news(category="stocks", limit=10)
