@@ -36,6 +36,7 @@ from tradingview_mcp.core.services.tv_scanner import (
     TVScannerEmpty,
     TVScannerUnavailable,
     ta_call,
+    upstream_fields,
 )
 
 try:
@@ -136,7 +137,7 @@ def get_commodity_snapshot() -> dict:
         except TVScannerUnavailable as e:
             _log.warning("TradingView %s screener degraded: %s", screener, e)
             out.setdefault("errors", []).append(f"{screener}: tradingview_scanner_unavailable")
-            out["upstream_status"] = "down"
+            out.update(upstream_fields(e))
             continue
         except TVScannerEmpty as e:
             _log.warning("TradingView %s screener returned empty: %s", screener, e)

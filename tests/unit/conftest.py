@@ -14,6 +14,7 @@ import pytest
 
 from tradingview_mcp.core.services import rate_limiter as _rl
 from tradingview_mcp.core.services import sentiment_service as _sent
+from tradingview_mcp.core.services import tv_scanner as _tv
 
 
 @pytest.fixture(autouse=True)
@@ -37,3 +38,15 @@ def _close_reddit_circuit():
     _sent._reset_breaker()
     yield
     _sent._reset_breaker()
+
+
+@pytest.fixture(autouse=True)
+def _open_tradingview_gate():
+    """Start every test with the TradingView 429 gate open and no breaker.
+
+    Same reason as the Reddit breaker: it is process-global, so one test that
+    simulates a 429 storm would make every later scanner test fail fast.
+    """
+    _tv.reset_rate_limit_for_tests()
+    yield
+    _tv.reset_rate_limit_for_tests()

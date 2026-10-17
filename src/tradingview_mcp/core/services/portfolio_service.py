@@ -29,6 +29,7 @@ from tradingview_mcp.core.services.log import get_logger
 from tradingview_mcp.core.services.news_service import fetch_news_summary
 from tradingview_mcp.core.services.screener_service import analyze_coin
 from tradingview_mcp.core.services.sec_service import get_insider_transactions
+from tradingview_mcp.core.services.tv_scanner import rate_limit_state
 from tradingview_mcp.core.services.yahoo_finance_service import (
     get_dividends,
     get_earnings,
@@ -103,6 +104,8 @@ def _scan_one(
     ta = analyze_coin(symbol, exchange, timeframe)
     if "error" in ta:
         out["ta_error"] = ta["error"]
+        if ta.get("upstream_status"):
+            out["upstream_status"] = ta["upstream_status"]
         ta = {}
     else:
         out["price"] = (ta.get("price_data") or {}).get("current_price")
@@ -230,12 +233,21 @@ def portfolio_scan(
     if ta_errors and len(ta_errors) >= max(2, int(len(ordered) * 0.5)):
         top_msg, top_count = collections.Counter(ta_errors).most_common(1)[0]
         is_tv_outage = "tradingview_scanner_unavailable" in top_msg
+        is_tv_limited = is_tv_outage and any(
+            r.get("upstream_status") == "rate_limited" for r in ordered if r.get("ta_error"))
         summary["upstream_warning"] = {
             "ta_failure_ratio": round(len(ta_errors) / len(ordered), 2),
             "most_common_error": top_msg,
             "affected_count": top_count,
-            "likely_cause": "tradingview_scanner_outage" if is_tv_outage else "shared_ta_failure",
+            "likely_cause": (
+                "tradingview_rate_limited" if is_tv_limited
+                else "tradingview_scanner_outage" if is_tv_outage
+                else "shared_ta_failure"
+            ),
             "recommended_action": (
+                "scanner.tradingview.com is answering HTTP 429 to this egress. Retrying "
+                "now only extends the block — wait for tradingview_rate_limit.retry_after_seconds."
+                if is_tv_limited else
                 "scanner.tradingview.com is degraded. Wait 60-120s and retry, "
                 "or rely on coin_analysis individually — it auto-falls back to Yahoo."
                 if is_tv_outage else
@@ -244,9 +256,15 @@ def portfolio_scan(
             ),
         }
 
+    # TradingView 429 state, once for the whole scan: rows above may be Yahoo
+    # fallbacks or cached readings because of it, not because of the tickers.
+    if any(r.get("upstream_status") == "rate_limited" for r in ordered):
+        summary["tradingview_rate_limit"] = rate_limit_state() or {"state": "recovered"}
+
     # Count results that came from the Yahoo fallback so the caller can
     # contextualize numbers as "degraded but real" vs missing.
-    degraded = sum(1 for r in ordered if r.get("degraded") or r.get("data_source") == "yahoo_fallback")
+    degraded = sum(1 for r in ordered if r.get("degraded")
+                   or r.get("data_source") in ("yahoo_fallback", "tradingview_cache"))
     if degraded:
         summary["degraded_count"] = degraded
 

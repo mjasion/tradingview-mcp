@@ -14,6 +14,7 @@ from tradingview_mcp.core.services.tv_scanner import (
     TVScannerEmpty,
     TVScannerUnavailable,
     ta_call,
+    upstream_fields,
 )
 from tradingview_mcp.core.utils.validators import EXCHANGE_SCREENER, is_stock_exchange
 
@@ -152,7 +153,7 @@ def volume_confirmation_analyze(
             analysis = ta_call(screener, timeframe, [full_symbol])
         except TVScannerUnavailable as exc:
             return {"error": "tradingview_scanner_unavailable",
-                    "upstream_status": "down", "detail": str(exc),
+                    **upstream_fields(exc), "detail": str(exc),
                     "symbol": full_symbol}
         except TVScannerEmpty:
             return {"error": f"No data found for {full_symbol}"}

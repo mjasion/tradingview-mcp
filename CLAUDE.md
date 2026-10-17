@@ -111,8 +111,16 @@ the recommendation states why. `portfolio_scan` was already honest
 (`upstream_warning`, `degraded_count`, `yahoo_rate_limit`) and additionally
 surfaces `news_error`.
 
+TradingView TA: an error envelope carries `upstream_status: "rate_limited"`
+(plus `upstream_reason` `http_429`/`circuit_open`, `retry_after_seconds`) or
+`"down"`. A stale-cache answer is `degraded: True`, `data_source:
+"tradingview_cache"`, `cache_age_seconds`, and `coin_analysis` reports
+`timestamp: "cached"` instead of `"real-time"`. `portfolio_scan` adds
+`tradingview_rate_limit` and `likely_cause: "tradingview_rate_limited"`.
+
 Tests that pin this contract: `test_sentiment_gaps.py`,
-`test_news_health.py`, `test_apewisdom.py`, `test_combined_confluence.py`.
+`test_news_health.py`, `test_apewisdom.py`, `test_combined_confluence.py`,
+`test_tv_rate_limit.py`.
 Adding a new source means adding its failure row there too.
 
 ## Sentiment and news sources
@@ -151,6 +159,30 @@ Adding a new source means adding its failure row there too.
   given; general feeds rarely name a mid-cap. Its results are `prefiltered`
   (the query already asked the ticker question), so the substring filter is
   skipped for it — "Apple beats on iPhone" is an AAPL story.
+
+## TradingView scanner
+
+- **`scanner.tradingview.com` rate-limits per egress IP**: CloudFront answers
+  `429` with an *empty body* and no `Retry-After`. `tradingview_ta` ignores the
+  status and `json.loads`es the body, so a 429 used to look exactly like a
+  weekend blip (`JSONDecodeError`) and got retried 4× in 4s. Verified
+  2026-10-17. Upstream (`atilaahmettaner/tradingview-mcp`) hasn't fixed it
+  either — it only has a stale cache and a cooldown.
+- **`tv_scanner.get_multiple_analysis` makes the request itself** (the library's
+  payload via `TradingView.data`, the library's parser via `calculate`) so the
+  status code is visible. Keep that name — tests monkeypatch it.
+- **429 → a process-global gate**: 5s, doubling, cap 60s; every worker thread
+  waits on it. A call waits and retries within a 60s budget; a call that runs
+  out trips the breaker (gate shut 5 min, `circuit_open` fails fast, first call
+  after the TTL probes, any success closes it). Env: `TRADINGVIEW_MCP_TV_429_*`,
+  `_TV_BREAKER_TTL`, `_TV_STALE_TTL` — see the module docstring.
+- **Stale cache** (≤6h, capped at 4 bars of the interval) is opt-in:
+  `ta_call(..., allow_stale=True)`, and only for callers that then spread
+  `stale_fields(analysis)` into their response. Error envelopes use
+  `upstream_fields(exc)`.
+- **TradingView traffic bypasses the egress proxies** — `requests.post`
+  goes out directly, only the global rate limiter applies.
+  `conftest.py` resets the gate around every test.
 
 ## Polish-market specifics
 

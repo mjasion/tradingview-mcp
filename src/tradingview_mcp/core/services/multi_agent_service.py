@@ -11,6 +11,8 @@ from tradingview_mcp.core.services.tv_scanner import (
     TVScannerEmpty,
     TVScannerUnavailable,
     ta_call,
+    stale_fields,
+    upstream_fields,
 )
 from tradingview_mcp.core.utils.validators import EXCHANGE_SCREENER
 
@@ -134,10 +136,10 @@ def run_multi_agent_analysis(
     screener = EXCHANGE_SCREENER.get(exchange, "crypto")
 
     try:
-        analysis = ta_call(screener, timeframe, [symbol])
+        analysis = ta_call(screener, timeframe, [symbol], allow_stale=True)
     except TVScannerUnavailable as exc:
         return {"error": "tradingview_scanner_unavailable",
-                "upstream_status": "down", "detail": str(exc),
+                **upstream_fields(exc), "detail": str(exc),
                 "symbol": symbol, "timeframe": timeframe,
                 "retry_hint": "scanner.tradingview.com degraded — retry in 60-120s "
                               "or use coin_analysis (which has a Yahoo fallback)."}
@@ -213,6 +215,7 @@ def run_multi_agent_analysis(
         "framework_name": "TradingAgents-MCP Pipeline",
         "target": symbol,
         "timeframe": timeframe,
+        **stale_fields(analysis),
         "agents_debate": {
             "technical_analyst": tech_analyst,
             "sentiment_analyst": sentiment_analyst,

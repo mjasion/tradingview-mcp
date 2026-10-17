@@ -19,6 +19,8 @@ from tradingview_mcp.core.services.tv_scanner import (
     TVScannerEmpty,
     TVScannerUnavailable,
     ta_call,
+    stale_fields,
+    upstream_fields,
 )
 from tradingview_mcp.core.utils.validators import EXCHANGE_SCREENER, get_market_type, get_tv_exchange_prefix
 
@@ -461,20 +463,23 @@ def analyze_coin(
     screener = EXCHANGE_SCREENER.get(exchange, "crypto")
 
     try:
-        analysis = ta_call(screener, timeframe, [full_symbol])
+        analysis = ta_call(screener, timeframe, [full_symbol], allow_stale=True)
     except TVScannerUnavailable as exc:
         from tradingview_mcp.core.services.yahoo_fallback import (
             analyze_coin_yahoo_fallback,
         )
+        upstream = upstream_fields(exc)
         fb = analyze_coin_yahoo_fallback(symbol, exchange, timeframe)
         if "error" not in fb:
-            fb["upstream_status"] = "tv_down"
+            fb.update(upstream)
+            if upstream["upstream_status"] == "down":
+                fb["upstream_status"] = "tv_down"
             fb["degraded"] = True
             fb["upstream_detail"] = str(exc)
             return fb
         return {
             "error": "tradingview_scanner_unavailable",
-            "upstream_status": "down",
+            **upstream,
             "detail": str(exc),
             "fallback_error": fb.get("error"),
             "retry_hint": "TradingView scanner is degraded. Yahoo fallback also failed. "
@@ -530,11 +535,13 @@ def analyze_coin(
                         trade_data["trade_quality"] = quality["quality"]
                         trade_data["trade_notes"] = quality["notes"]
 
+        stale = stale_fields(analysis)
         return {
             "symbol": full_symbol,
             "exchange": exchange,
             "timeframe": timeframe,
-            "timestamp": "real-time",
+            "timestamp": "cached" if stale else "real-time",
+            **stale,
             "price_data": {
                 "current_price": metrics["price"],
                 "open": round(open_price, 6) if open_price else None,
@@ -612,7 +619,7 @@ def scan_consecutive_candles(
         analysis = ta_call(screener, timeframe, symbols)
     except TVScannerUnavailable as exc:
         return {"error": "tradingview_scanner_unavailable",
-                "upstream_status": "down", "detail": str(exc),
+                **upstream_fields(exc), "detail": str(exc),
                 "exchange": exchange, "timeframe": timeframe}
     except TVScannerEmpty as exc:
         return {"error": f"Pattern analysis returned no rows: {exc}",
@@ -733,7 +740,7 @@ def scan_advanced_candle_patterns_single_tf(
         analysis = ta_call(screener, base_timeframe, symbols)
     except TVScannerUnavailable as exc:
         return {"error": "tradingview_scanner_unavailable",
-                "upstream_status": "down", "detail": str(exc),
+                **upstream_fields(exc), "detail": str(exc),
                 "exchange": exchange, "base_timeframe": base_timeframe}
     except TVScannerEmpty:
         return {"error": "no_data", "exchange": exchange, "base_timeframe": base_timeframe,
