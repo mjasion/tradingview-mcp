@@ -14,7 +14,7 @@ Design decisions (see the conversation that introduced this):
   tool timeout, a caller that would have to wait longer than ``max_wait`` for its
   slot raises :class:`RateLimitTimeout` instead of blocking forever. The server
   sheds the request fast rather than hanging until the agent gives up.
-* **Thread-safe.** FastMCP runs each synchronous tool in its own worker thread,
+* **Thread-safe.** MCPServer runs each synchronous tool in a worker thread,
   so concurrent MCP requests reach this limiter from many threads at once. Slot
   reservation is guarded by a lock; the actual sleep happens *outside* the lock
   so queued callers don't serialize on the mutex itself.

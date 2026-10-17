@@ -10,8 +10,16 @@ Fork of `atilaahmettaner/tradingview-mcp` extended with global stock market
 coverage and Polish data providers.
 
 Entry point: `src/tradingview_mcp/server.py` (`tradingview-mcp` script).
-Transport: `streamable-http` on port 8000 by default; also `stdio` for desktop
-clients.
+Transport: `stdio` when invoked bare (what desktop clients use); the Docker
+image runs `streamable-http` on port 8000.
+
+Built on the MCP Python SDK **2.x** (`mcp.server.mcpserver.MCPServer`; the v1
+`mcp.server.fastmcp.FastMCP` import no longer exists). Host/port go to
+`mcp.run(transport="streamable-http", host=..., port=...)`, not `mcp.settings`.
+The SDK serves MCP only at `/mcp`; `/health` is our own `@mcp.custom_route`
+in `server.py` — the Docker `HEALTHCHECK` and the k3s probes depend on it.
+Binding to `127.0.0.1`/`localhost`/`::1` makes the SDK enforce DNS-rebinding
+protection (mismatched `Host` header → 421); `0.0.0.0` leaves it off.
 
 ## Layout
 
@@ -78,8 +86,8 @@ tests/unit/                            # pytest, all fast (no network)
 ## Running locally
 
 ```bash
-uv run tradingview-mcp                                 # streamable-http on :8000
-uv run tradingview-mcp stdio                           # for Claude Desktop / similar
+uv run tradingview-mcp                                 # stdio (the argparse default) — for Claude Desktop / similar
+uv run tradingview-mcp streamable-http --host 0.0.0.0 --port 8000   # HTTP; what the Docker CMD runs
 uv run tradingview-mcp check-proxy                     # probe every egress via ipinfo.io (live board on a tty, streamed lines when piped); --json for raw
 TRADINGVIEW_MCP_LOG_LEVEL=DEBUG uv run tradingview-mcp # verbose logs to stderr
 uv run pytest -q                                       # tests, ~50ms, no network
@@ -101,7 +109,7 @@ hosts may need `dangerouslyDisableSandbox: true` for ad-hoc probes.
 
 `core/services/rate_limiter.py` is a process-global FIFO queue: at most one
 *external* HTTP request starts every `1/RPS` seconds (default 1/s), across all
-hosts, to stop upstreams blocking the egress. It's thread-safe (FastMCP runs
+hosts, to stop upstreams blocking the egress. It's thread-safe (MCPServer runs
 each sync tool in its own worker thread) and applied at the four outbound
 chokepoints — so new network code is throttled automatically if it uses them:
 
@@ -146,3 +154,7 @@ behaviour is covered with injected instances in `test_rate_limiter.py`.
   titles are intentional (1 request vs N+1, fast enough for filtering).
 - Don't hard-code `python3.X` paths in the Dockerfile — use `/usr/local/lib`
   so base-image bumps are version-agnostic.
+- Don't replace the Dockerfile's `uv export --frozen … && uv pip install -r`
+  with `uv pip install --system .` — that re-resolves from `pyproject.toml`
+  and ignores `uv.lock`, so a new upstream major (as with `mcp` 2.0) lands
+  in the image untested. Bump deps with `uv lock --upgrade-package <name>`.

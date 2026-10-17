@@ -13,7 +13,7 @@ from __future__ import annotations
 import argparse
 import os
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 # Initialise the human-readable logger BEFORE importing services so they
 # attach to a configured handler (otherwise the first call gets a default
@@ -84,7 +84,7 @@ except ImportError:
 
 # ── MCP server instance ────────────────────────────────────────────────────────
 
-mcp = FastMCP(
+mcp = MCPServer(
     name="TradingView Multi-Market Screener",
     instructions=(
         "Multi-market screener backed by TradingView. "
@@ -911,6 +911,18 @@ def exchanges_list() -> str:
     return "Common exchanges: KUCOIN, BINANCE, BYBIT, MEXC, BITGET, OKX, COINBASE, GATEIO, HUOBI, BITFINEX, KRAKEN, BITSTAMP, BIST, EGX, NASDAQ, TWSE, TPEX"
 
 
+# ── Health endpoint ───────────────────────────────────────────────────────
+
+# The SDK serves only /mcp; Docker's HEALTHCHECK and the k3s probes need a
+# plain GET that doesn't open an MCP session. Registering it here keeps the
+# container healthcheck a one-liner instead of a scripted initialize POST.
+@mcp.custom_route("/health", methods=["GET"])
+async def health(_request):  # noqa: ANN001 - starlette Request
+    from starlette.responses import JSONResponse
+
+    return JSONResponse({"status": "ok"})
+
+
 # ── Entry point ────────────────────────────────────────────────────────────────
 
 def main() -> None:
@@ -955,12 +967,10 @@ def main() -> None:
     if args.transport == "stdio":
         mcp.run()
     else:
-        try:
-            mcp.settings.host = args.host
-            mcp.settings.port = args.port
-        except Exception:
-            pass
-        mcp.run(transport="streamable-http")
+        # mcp 2.x: host/port are run() kwargs (mcp.settings.host/port are gone).
+        # Note: with host 127.0.0.1/localhost/::1 the SDK auto-enables DNS-rebinding
+        # protection (Host header must be one of those); 0.0.0.0 leaves it off.
+        mcp.run(transport="streamable-http", host=args.host, port=args.port)
 
 
 if __name__ == "__main__":

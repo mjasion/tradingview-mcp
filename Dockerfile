@@ -11,8 +11,15 @@ WORKDIR /app
 # Copy everything (needed for editable install)
 COPY . .
 
-# Install the package and its dependencies into the system Python
-RUN uv pip install --system .
+# Install the exact dependency set from uv.lock, then the package itself.
+# `uv pip install --system .` re-resolves from pyproject.toml on every build
+# and silently pulls whatever is newest on PyPI — that's how a fresh `mcp`
+# major release broke the image while uv.lock still pinned the old one.
+# `--frozen` fails the build if uv.lock is out of date instead of re-resolving.
+RUN uv export --frozen --no-dev --no-emit-project --no-hashes -o /tmp/requirements.txt \
+    && uv pip install --system --no-cache -r /tmp/requirements.txt \
+    && uv pip install --system --no-cache --no-deps . \
+    && rm /tmp/requirements.txt
 
 # ---- Stage 2: Runtime ----
 FROM python:3.14-slim
