@@ -1,5 +1,5 @@
 # ---- Stage 1: Build ----
-FROM python:3.14-slim AS builder
+FROM python:3.15-slim AS builder
 
 # Install system deps and uv
 RUN apt-get update && apt-get install -y --no-install-recommends curl \
@@ -22,7 +22,7 @@ RUN uv export --frozen --no-dev --no-emit-project --no-hashes -o /tmp/requiremen
     && rm /tmp/requirements.txt
 
 # ---- Stage 2: Runtime ----
-FROM python:3.14-slim
+FROM python:3.15-slim
 
 WORKDIR /app
 
